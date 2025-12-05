@@ -189,14 +189,17 @@ with st.sidebar:
         st.metric("Ley actual", f"{estado_actual['L_actual']*100:.2f} %")
         st.metric("Humedad SAG", f"{estado_actual['H_sag']*100:.1f} %")
         
+        # Verificar si hay datos antes de acceder
         if historial['F_finos'] and len(historial['F_finos']) > 0:
             st.metric("Finos actuales", f"{historial['F_finos'][-1]:.0f} t/h")
+        else:
+            st.metric("Finos actuales", "0 t/h")
     
-    # Indicador de equilibrio
+    # Indicador de equilibrio (con verificación)
     if historial['F_chancado'] and len(historial['F_chancado']) > 0:
         F_chancado_actual = historial['F_chancado'][-1]
-        F_sobre_actual = historial['F_sobre_tamano'][-1] if historial['F_sobre_tamano'] else 0
-        F_descarga_actual = historial['F_descarga'][-1] if historial['F_descarga'] else 0
+        F_sobre_actual = historial['F_sobre_tamano'][-1] if historial['F_sobre_tamano'] and len(historial['F_sobre_tamano']) > 0 else 0
+        F_descarga_actual = historial['F_descarga'][-1] if historial['F_descarga'] and len(historial['F_descarga']) > 0 else 0
         
         balance = F_chancado_actual + F_sobre_actual - F_descarga_actual
         equilibrio = min(abs(balance) / max(F_chancado_actual, 1), 1.0)
@@ -287,7 +290,7 @@ def crear_grafico_masas(historial):
             hovertemplate='%{y:.0f} t<extra>Masa Teórica</extra>'
         ))
         
-        # Masa de agua (en escala secundaria si es muy diferente)
+        # Masa de agua
         fig.add_trace(go.Scatter(
             x=t, y=historial['W_sag'],
             name='Agua', line=dict(color='cyan', width=2),
@@ -419,10 +422,10 @@ with st.expander("📈 **Información del Sistema y Comportamiento Esperado**"):
     estado = st.session_state.simulador.obtener_estado()
     params = st.session_state.simulador.params
     
-    # Cálculos de equilibrio
+    # Cálculos de equilibrio (con verificación)
     if historial['F_chancado'] and len(historial['F_chancado']) > 0:
         F_chancado_actual = historial['F_chancado'][-1]
-        F_sobre_actual = historial['F_sobre_tamano'][-1] if historial['F_sobre_tamano'] else 0
+        F_sobre_actual = historial['F_sobre_tamano'][-1] if historial['F_sobre_tamano'] and len(historial['F_sobre_tamano']) > 0 else 0
         F_alimentacion = F_chancado_actual + F_sobre_actual
         
         M_equilibrio = F_alimentacion / params['k_descarga'] if params['k_descarga'] > 0 else 0
@@ -440,7 +443,7 @@ with st.expander("📈 **Información del Sistema y Comportamiento Esperado**"):
         ### **Balance de Masa:**
         
         - **Alimentación total:** {F_alimentacion:.0f} t/h
-        - **Descarga actual:** {historial['F_descarga'][-1] if historial['F_descarga'] else 0:.0f} t/h
+        - **Descarga actual:** {historial['F_descarga'][-1] if historial['F_descarga'] and len(historial['F_descarga']) > 0 else 0:.0f} t/h
         - **Masa de equilibrio teórica:** {M_equilibrio:.0f} t ( = F_alimentacion / k)
         - **Masa actual en SAG:** {M_actual:.0f} t
         - **Diferencia:** {diferencia:.0f} t ({diferencia/M_equilibrio*100 if M_equilibrio > 0 else 0:.1f}%)
@@ -465,7 +468,7 @@ with st.expander("📈 **Información del Sistema y Comportamiento Esperado**"):
 # ================= PIE DE PÁGINA =================
 st.markdown("---")
 
-# Métricas finales
+# Métricas finales (con verificaciones)
 estado = st.session_state.simulador.obtener_estado()
 historial = st.session_state.simulador.obtener_historial()
 
@@ -487,8 +490,8 @@ with col3:
 with col4:
     if historial['F_chancado'] and len(historial['F_chancado']) > 0:
         F_chancado_actual = historial['F_chancado'][-1]
-        F_sobre_actual = historial['F_sobre_tamano'][-1] if historial['F_sobre_tamano'] else 0
-        F_descarga_actual = historial['F_descarga'][-1] if historial['F_descarga'] else 0
+        F_sobre_actual = historial['F_sobre_tamano'][-1] if historial['F_sobre_tamano'] and len(historial['F_sobre_tamano']) > 0 else 0
+        F_descarga_actual = historial['F_descarga'][-1] if historial['F_descarga'] and len(historial['F_descarga']) > 0 else 0
         balance = F_chancado_actual + F_sobre_actual - F_descarga_actual
         
         if abs(balance) < 50:
@@ -499,6 +502,8 @@ with col4:
             estado_balance = "📉 Bajando"
         
         st.metric("Balance masa", f"{balance:.0f} t/h", estado_balance)
+    else:
+        st.metric("Balance masa", "0 t/h", "⏳ Inicial")
 
 # Mensaje de estado final
 st.markdown("---")
@@ -511,6 +516,14 @@ if not st.session_state.simulando:
     La simulación avanzará a 1 paso por segundo real (60 minutos simulados por segundo real).
     """)
 else:
+    # Calcular masa de equilibrio esperada (con verificación)
+    masa_equilibrio_texto = ""
+    if historial['F_target'] and len(historial['F_target']) > 0 and st.session_state.simulador.params['k_descarga'] > 0:
+        masa_equilibrio = historial['F_target'][-1] / st.session_state.simulador.params['k_descarga']
+        masa_equilibrio_texto = f"La masa debería estabilizarse en: **M = F_alimentacion / k ≈ {masa_equilibrio:.0f} toneladas**"
+    else:
+        masa_equilibrio_texto = "La masa debería estabilizarse en: **M = F_alimentacion / k** (ejecuta la simulación para ver valores)"
+    
     st.success(f"""
     🔄 **Simulación en curso** 
     
@@ -518,7 +531,7 @@ else:
     - Tiempo simulado: **{estado['t']:.1f} horas**
     - Velocidad: **1 paso/segundo real**
     
-    La masa debería estabilizarse en: **M = F_alimentacion / k ≈ {historial['F_target'][-1] / st.session_state.simulador.params['k_descarga']:.0f} toneladas**
+    {masa_equilibrio_texto}
     """)
 
 # Nota informativa
