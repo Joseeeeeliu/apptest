@@ -1,12 +1,13 @@
 """
-SIMULADOR SAG - VERSIÓN ESTABLE Y BALANCEADA
-Sin crecimiento descontrolado, con balance correcto
+SIMULADOR SAG - VERSIÓN CON AUTO-AVANCE Y VARIABILIDAD ORIGINAL
+Actualización automática + comportamiento aleatorio realista
 """
 
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 import time
+import random
 
 # ================= CONFIGURACIÓN INICIAL =================
 st.set_page_config(
@@ -20,19 +21,36 @@ if 'inicializado' not in st.session_state:
     # Variables de control
     st.session_state.inicializado = True
     st.session_state.simulando = False
-    st.session_state.ultimo_tiempo = time.time()
+    st.session_state.ultima_actualizacion = 0
+    st.session_state.semilla_aleatoria = random.randint(1, 10000)
     
-    # Estado actual - VALORES INICIALES REALISTAS
+    # Parámetros del modelo (iguales a la versión original)
+    st.session_state.params = {
+        'F_nominal': 45000/(24*0.94),  # ~2000 t/h
+        'L_nominal': 0.0072,
+        'fraccion_recirculacion': 0.11,
+        'humedad_alimentacion': 0.035,
+        'humedad_sag': 0.30,
+        'humedad_recirculacion': 0.08,
+        'k_descarga': 0.5,  # 1/hora - ajustado para estabilidad
+        'tau_recirculacion': 1.5,  # horas
+        'tau_finos': 0.8,  # horas
+        'tau_arranque': 0.5  # horas
+    }
+    
+    # Estado actual del sistema
     st.session_state.estado = {
         'tiempo': 0.0,                    # horas
-        'M_sag': 100.0,                   # ton (más realista)
-        'W_sag': 42.86,                   # ton (30% humedad: 100/(1-0.3)-100)
+        'M_sag': 100.0,                   # ton
+        'W_sag': 42.86,                   # ton (para 30% humedad)
         'M_cu_sag': 0.72,                 # ton (0.72% de 100 ton)
         'F_chancado': 0.0,                # t/h
         'L_chancado': 0.0072,             # 0.72%
         'F_finos': 0.0,                   # t/h
         'F_sobre_tamano': 0.0,            # t/h
-        'H_sag': 0.30                     # 30%
+        'H_sag': 0.30,                    # 30%
+        'variacion_actual': 0.0,          # para tracking
+        'ley_variacion': 0.0              # para tracking
     }
     
     # Objetivos
@@ -41,24 +59,52 @@ if 'inicializado' not in st.session_state:
         'L_target': 0.0072                # 0.72%
     }
     
-    # Historial
+    # Historial para gráficos
     st.session_state.historial = {
         't': [], 'M_sag': [], 'W_sag': [], 'M_cu_sag': [],
         'F_chancado': [], 'L_chancado': [], 'F_finos': [],
         'F_sobre_tamano': [], 'F_target': [], 'L_target': []
     }
 
-# ================= FUNCIÓN DE SIMULACIÓN BALANCEADA =================
+# ================= FUNCIÓN DE SIMULACIÓN CON VARIABILIDAD =================
 def simular_paso():
-    """Ejecuta un paso de simulación con BALANCE CORRECTO"""
+    """Ejecuta un paso de simulación con variabilidad realista"""
     estado = st.session_state.estado
     objetivos = st.session_state.objetivos
+    params = st.session_state.params
     
     # Paso de tiempo (1 minuto en horas)
     dt = 1/60.0
     
     # Actualizar tiempo
     estado['tiempo'] += dt
+    
+    # ========== ARRANQUE GRADUAL (como en el original) ==========
+    if estado['tiempo'] > 0:
+        factor_arranque = 1 - np.exp(-estado['tiempo'] / params['tau_arranque'])
+    else:
+        factor_arranque = 0
+    
+    # ========== VARIABILIDAD ALEATORIA (como en el original) ==========
+    # Usar semilla reproducible para consistencia
+    np.random.seed(st.session_state.semilla_aleatoria + int(estado['tiempo']*100))
+    
+    perturbacion = 0
+    lenta = media = rapida = 0
+    
+    if estado['tiempo'] > 2.0:  # Después de 2 horas
+        # Componentes de variabilidad (igual que el código original)
+        lenta = 0.02 * np.sin(0.3 * estado['tiempo']) + 0.01 * np.sin(0.7 * estado['tiempo'] + 1)
+        media = 0.01 * np.sin(2.0 * estado['tiempo'] + 2)
+        rapida = 0.005 * np.random.normal(0, 1)
+        
+        # Perturbaciones aleatorias (ocasionales)
+        if np.random.random() < 0.002:  # 0.2% de probabilidad
+            perturbacion += np.random.uniform(-0.04, -0.02)
+        if np.random.random() < 0.0003:  # 0.03% de probabilidad
+            perturbacion += np.random.uniform(-0.1, -0.05)
+    
+    random_factor = 1 + lenta + media + rapida + perturbacion
     
     # ========== DINÁMICA DE ALIMENTACIÓN ==========
     # Flujo sigue objetivo con dinámica de primer orden
@@ -67,58 +113,63 @@ def simular_paso():
     dF_dt = error_F / tau_F
     estado['F_chancado'] += dF_dt * dt
     
-    # Ley sigue objetivo
-    tau_L = 2.0  # 2 horas para cambios
+    # Aplicar variabilidad y arranque gradual
+    estado['F_chancado'] = estado['F_chancado'] * factor_arranque * random_factor
+    
+    # Limitar valores físicos
+    estado['F_chancado'] = np.clip(estado['F_chancado'], 
+                                  0.1 * objetivos['F_target'], 
+                                  1.5 * objetivos['F_target'])
+    
+    # ========== DINÁMICA DE LEY ==========
+    # Variabilidad en la ley (como en el original)
+    if estado['tiempo'] > 0:
+        ley_variacion = 0.02 * np.sin(0.5 * estado['tiempo'] + 3) + 0.01 * np.random.normal(0, 0.5)
+        estado['L_chancado'] = params['L_nominal'] * (1 + 0.08 * ley_variacion)
+        estado['L_chancado'] = np.clip(estado['L_chancado'], 
+                                     0.7 * params['L_nominal'], 
+                                     1.3 * params['L_nominal'])
+        estado['ley_variacion'] = ley_variacion  # Para tracking
+    
+    # Perseguir objetivo de ley
+    tau_L = 2.0
     error_L = objetivos['L_target'] - estado['L_chancado']
     dL_dt = error_L / tau_L
     estado['L_chancado'] += dL_dt * dt
     
-    # Variabilidad REALISTA (sin crecimiento exponencial)
-    if estado['tiempo'] > 2.0:
-        # Variación suave (máximo ±3%)
-        variacion = 0.015 * np.sin(0.5 * estado['tiempo']) + 0.01 * np.sin(1.5 * estado['tiempo'] + 1)
-        estado['F_chancado'] = estado['F_chancado'] * (1 + variacion)
-    
-    # Limitar valores físicos
-    estado['F_chancado'] = max(estado['F_chancado'], 0.0)
-    estado['L_chancado'] = np.clip(estado['L_chancado'], 0.005, 0.015)
+    estado['variacion_actual'] = (random_factor - 1) * 100  # Para mostrar en porcentaje
     
     # ========== CÁLCULOS DEL SAG ==========
-    # Recirculación (11% con retardo de 1.5 horas)
-    if estado['tiempo'] > 1.5:  # 1.5 HORAS, no minutos
-        # Flujo con retardo (simplificado)
-        F_chancado_retrasado = max(estado['F_chancado'] * 0.9, 0)  # 10% pérdida
-        estado['F_sobre_tamano'] = 0.11 * F_chancado_retrasado
+    # Recirculación (con retardo)
+    if estado['tiempo'] > params['tau_recirculacion']:
+        # Simplificación: usar flujo actual con factor de reducción
+        estado['F_sobre_tamano'] = params['fraccion_recirculacion'] * estado['F_chancado'] * 0.9
     else:
         estado['F_sobre_tamano'] = 0.0
     
     # Alimentación total al SAG
     F_alimentacion_total = estado['F_chancado'] + estado['F_sobre_tamano']
     
-    # ========== BALANCE DE MASA CRÍTICO ==========
-    # CONSTANTE k AJUSTADA PARA ESTABILIDAD
-    # Si k = 0.5, significa que la mitad de la masa sale por hora
-    # En equilibrio: F_descarga = k * M_sag = F_alimentacion_total
-    # => M_sag_equilibrio = F_alimentacion_total / k
-    
-    k = 0.5  # 1/hora - ¡ESTE ES EL PARÁMETRO CLAVE!
-    
+    # ========== BALANCE DE MASA ==========
     # Descarga del SAG
-    F_descarga = k * estado['M_sag']  # t/h
+    F_descarga = params['k_descarga'] * estado['M_sag']  # t/h
     
-    # Finos (con retardo de 0.8 horas)
-    if estado['tiempo'] > 0.8:  # 0.8 HORAS
+    # Finos (con retardo)
+    if estado['tiempo'] > params['tau_finos']:
         estado['F_finos'] = max(F_descarga - estado['F_sobre_tamano'], 0)
+        
+        # Crecimiento gradual de finos (como en el original)
+        if estado['tiempo'] < params['tau_finos'] + 1.0:
+            factor_crecimiento = 1 - np.exp(-(estado['tiempo'] - params['tau_finos']) / 0.3)
+            estado['F_finos'] *= factor_crecimiento
     else:
         estado['F_finos'] = 0
     
     # ========== ECUACIONES DIFERENCIALES ==========
-    # dM/dt = entrada - salida (CONVERTIDO A t/min)
-    dM_dt = (F_alimentacion_total - F_descarga) / 60.0  # t/min
+    # Balance de masa sólida (convertido a t/min)
+    dM_dt = (F_alimentacion_total - F_descarga) / 60.0
     estado['M_sag'] += dM_dt * dt
-    
-    # Evitar valores negativos o muy pequeños
-    estado['M_sag'] = max(estado['M_sag'], 10.0)
+    estado['M_sag'] = max(estado['M_sag'], 10.0)  # Mínimo físico
     
     # Balance de cobre
     if estado['M_sag'] > 0.1:
@@ -126,7 +177,7 @@ def simular_paso():
     else:
         L_sag = estado['L_chancado']
     
-    # Flujo de cobre (convertido a t/min)
+    # Flujos de cobre (convertido a t/min)
     entrada_cu = (estado['L_chancado'] * estado['F_chancado'] + 
                   L_sag * estado['F_sobre_tamano']) / 60.0
     salida_cu = (L_sag * F_descarga) / 60.0
@@ -134,16 +185,17 @@ def simular_paso():
     estado['M_cu_sag'] += dMcu_dt * dt
     estado['M_cu_sag'] = max(estado['M_cu_sag'], 0.001)
     
-    # Humedad del SAG (controlada)
-    agua_necesaria = estado['M_sag'] * (0.30 / (1 - 0.30))  # para 30% humedad
-    estado['W_sag'] = agua_necesaria  # Control simple de agua
+    # Balance de agua (simplificado)
+    agua_necesaria = estado['M_sag'] * (params['humedad_sag'] / (1 - params['humedad_sag']))
+    estado['W_sag'] = agua_necesaria
+    
+    # Humedad actual
+    estado['H_sag'] = estado['W_sag'] / max(estado['M_sag'] + estado['W_sag'], 0.001)
     
     # ========== GUARDAR HISTORIAL ==========
-    # Solo guardar cada 60 pasos (1 punto por hora)
-    if int(estado['tiempo'] / dt) % 60 == 0:
-        # Limitar historial a las últimas 48 horas
-        max_horas = 48
-        max_puntos = max_horas * 60  # 1 punto por minuto
+    # Guardar cada 10 pasos (aproximadamente cada 10 segundos reales)
+    if int(estado['tiempo'] / dt) % 10 == 0:
+        max_puntos = 24 * 360  # 10 puntos por hora por 24 horas
         
         for key in ['t', 'M_sag', 'W_sag', 'M_cu_sag', 
                     'F_chancado', 'L_chancado', 'F_finos', 'F_sobre_tamano']:
@@ -154,11 +206,11 @@ def simular_paso():
             
             st.session_state.historial[key].append(valor)
             
-            # Truncar si es muy largo
+            # Mantener tamaño manejable
             if len(st.session_state.historial[key]) > max_puntos:
                 st.session_state.historial[key] = st.session_state.historial[key][-max_puntos:]
         
-        # Guardar objetivos también
+        # Guardar objetivos
         st.session_state.historial['F_target'].append(objetivos['F_target'])
         st.session_state.historial['L_target'].append(objetivos['L_target'])
         
@@ -169,7 +221,8 @@ def simular_paso():
 # ================= FUNCIONES PARA BOTONES =================
 def iniciar_simulacion():
     st.session_state.simulando = True
-    st.session_state.ultimo_tiempo = time.time()
+    st.session_state.ultima_actualizacion = time.time()
+    st.session_state.semilla_aleatoria = random.randint(1, 10000)
 
 def pausar_simulacion():
     st.session_state.simulando = False
@@ -185,10 +238,28 @@ def reiniciar_simulacion():
         'L_chancado': 0.0072,
         'F_finos': 0.0,
         'F_sobre_tamano': 0.0,
-        'H_sag': 0.30
+        'H_sag': 0.30,
+        'variacion_actual': 0.0,
+        'ley_variacion': 0.0
     }
     for key in st.session_state.historial:
         st.session_state.historial[key] = []
+    st.session_state.semilla_aleatoria = random.randint(1, 10000)
+
+# ================= EJECUTAR SIMULACIÓN SI ESTÁ ACTIVA =================
+# Esta es la parte CRÍTICA: avanzar la simulación si está activa
+if st.session_state.simulando:
+    # Verificar cuánto tiempo ha pasado desde la última actualización
+    tiempo_actual = time.time()
+    
+    # Si es la primera vez o ha pasado más de 0.1 segundos
+    if st.session_state.ultima_actualizacion == 0 or tiempo_actual - st.session_state.ultima_actualizacion > 0.1:
+        # Ejecutar un paso de simulación
+        simular_paso()
+        st.session_state.ultima_actualizacion = tiempo_actual
+        
+        # Forzar una actualización de la interfaz
+        st.rerun()
 
 # ================= INTERFAZ PRINCIPAL =================
 st.title("🏭 Simulador Planta Concentradora - Molino SAG")
@@ -199,78 +270,81 @@ with st.sidebar:
     st.header("🎛️ **Controles de Operación**")
     
     # Estado de la simulación
-    estado_sim = "🟢 EN EJECUCIÓN" if st.session_state.simulando else "⏸️ PAUSADA"
+    estado_sim = "🟢 EJECUTANDO" if st.session_state.simulando else "⏸️ PAUSADA"
     st.markdown(f"**Estado:** {estado_sim}")
     
     # Botones
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("▶️ Iniciar", 
-                    on_click=iniciar_simulacion,
-                    type="primary",
-                    use_container_width=True,
-                    disabled=st.session_state.simulando):
-            pass
+        st.button("▶️ Iniciar", 
+                 on_click=iniciar_simulacion,
+                 type="primary",
+                 use_container_width=True,
+                 disabled=st.session_state.simulando)
     
     with col2:
-        if st.button("⏸️ Pausar",
-                    on_click=pausar_simulacion,
-                    use_container_width=True,
-                    disabled=not st.session_state.simulando):
-            pass
+        st.button("⏸️ Pausar",
+                 on_click=pausar_simulacion,
+                 use_container_width=True,
+                 disabled=not st.session_state.simulando)
     
-    if st.button("🔄 Reiniciar",
-                on_click=reiniciar_simulacion,
-                use_container_width=True):
-        pass
+    st.button("🔄 Reiniciar",
+             on_click=reiniciar_simulacion,
+             use_container_width=True)
     
     st.markdown("---")
     
-    # ========== PARÁMETROS CLAVE ==========
-    st.subheader("🎯 **Parámetros Clave**")
+    # ========== OBJETIVOS ==========
+    st.subheader("🎯 **Objetivos de Operación**")
     
-    # Flujo objetivo
     F_objetivo = st.slider(
-        "**Flujo Objetivo (t/h)**",
+        "**Flujo (t/h)**",
         500.0, 5000.0, st.session_state.objetivos['F_target'],
         step=100.0,
-        help="Flujo total de alimentación al circuito"
+        key="slider_flujo"
     )
     
-    # Ley objetivo
     L_objetivo = st.slider(
-        "**Ley Objetivo (%)**",
+        "**Ley (%)**",
         0.3, 1.5, st.session_state.objetivos['L_target'] * 100,
         step=0.05,
         format="%.2f",
-        help="Ley de cobre en la alimentación"
-    )
-    
-    # Constante k (MOSTRAR PERO NO EDITAR POR AHORA)
-    st.markdown("---")
-    st.subheader("⚙️ **Parámetro de Control**")
-    k_valor = st.slider(
-        "**Constante de Descarga (k)**",
-        0.1, 2.0, 0.5, 0.1,
-        help="k = Descarga / Masa_SAG [1/hora]. Define cuán rápido sale el material"
+        key="slider_ley"
     )
     
     # Actualizar objetivos
     st.session_state.objetivos['F_target'] = F_objetivo
     st.session_state.objetivos['L_target'] = L_objetivo / 100.0
-    # k se usa directamente en la función simular_paso()
+    
+    st.markdown("---")
+    
+    # ========== PARÁMETROS ==========
+    with st.expander("⚙️ **Parámetros Avanzados**"):
+        k_valor = st.slider(
+            "Constante descarga (k) [1/hora]",
+            0.1, 2.0, st.session_state.params['k_descarga'], 0.1,
+            help="k = Descarga / Masa. Valores más altos = masa menor en equilibrio"
+        )
+        st.session_state.params['k_descarga'] = k_valor
+        
+        recirc = st.slider(
+            "Recirculación (%)",
+            5.0, 20.0, st.session_state.params['fraccion_recirculacion'] * 100, 1.0
+        )
+        st.session_state.params['fraccion_recirculacion'] = recirc / 100.0
     
     st.markdown("---")
     
     # ========== ESTADO ACTUAL ==========
     st.subheader("📊 **Estado Actual**")
     estado = st.session_state.estado
+    params = st.session_state.params
     
     # Cálculos para mostrar
-    F_alimentacion_total = estado['F_chancado'] + estado['F_sobre_tamano']
-    k = 0.5  # Usar el valor fijo por ahora
-    F_descarga = k * estado['M_sag']
-    balance = F_alimentacion_total - F_descarga
+    F_alimentacion = estado['F_chancado'] + estado['F_sobre_tamano']
+    F_descarga = params['k_descarga'] * estado['M_sag']
+    balance = F_alimentacion - F_descarga
+    M_equilibrio = F_alimentacion / params['k_descarga'] if params['k_descarga'] > 0 else 0
     
     col1, col2 = st.columns(2)
     with col1:
@@ -281,32 +355,13 @@ with st.sidebar:
     with col2:
         st.metric("Ley", f"{estado['L_chancado']*100:.2f} %")
         st.metric("Finos", f"{estado['F_finos']:.0f} t/h")
-        st.metric("Balance", f"{balance:.0f} t/h", 
-                 delta="ESTABLE" if abs(balance) < 50 else "INESTABLE")
+        st.metric("Variación", f"{estado['variacion_actual']:.1f}%")
     
-    # Información del equilibrio
-    if abs(balance) < 50:
-        st.success("✅ Sistema en equilibrio")
-    else:
-        st.warning("⚠️ Sistema buscando equilibrio")
-
-# ================= EJECUTAR SIMULACIÓN =================
-# Control de velocidad: tiempo real (1 segundo real = 1 minuto simulado)
-if st.session_state.simulando:
-    tiempo_actual = time.time()
-    tiempo_transcurrido = tiempo_actual - st.session_state.ultimo_tiempo
-    
-    # Avanzar simulación según tiempo real
-    # 1 segundo real = 1 minuto simulado
-    if tiempo_transcurrido >= 0.1:  # Cada 0.1 segundos reales
-        # Ejecutar pasos de simulación
-        for _ in range(int(tiempo_transcurrido / 0.1)):
-            simular_paso()
-        
-        st.session_state.ultimo_tiempo = tiempo_actual
-        
-        # Forzar actualización de la interfaz (sin recursión)
-        st.rerun()
+    # Indicador de equilibrio
+    equilibrio = min(abs(balance)/1000, 1.0)
+    color = "🟢" if abs(balance) < 100 else "🟡" if abs(balance) < 500 else "🔴"
+    st.progress(equilibrio, 
+               text=f"{color} Balance: {balance:.0f} t/h (Objetivo: {M_equilibrio:.0f} t)")
 
 # ================= GRÁFICOS =================
 # Función para gráfico de balance
@@ -318,23 +373,26 @@ def crear_grafico_balance():
     if len(t) > 1:
         fig.add_trace(go.Scatter(
             x=t, y=st.session_state.historial['F_chancado'],
-            name='Chancado', line=dict(color='blue', width=2)
+            name='Chancado', line=dict(color='blue', width=2),
+            hovertemplate='%{y:.0f} t/h<extra>Chancado</extra>'
         ))
         
         fig.add_trace(go.Scatter(
             x=t, y=st.session_state.historial['F_finos'],
-            name='Finos', line=dict(color='green', width=2)
+            name='Finos', line=dict(color='green', width=2),
+            hovertemplate='%{y:.0f} t/h<extra>Finos</extra>'
         ))
         
         fig.add_trace(go.Scatter(
             x=t, y=st.session_state.historial['F_sobre_tamano'],
-            name='Sobretamaño', line=dict(color='red', width=2)
+            name='Sobretamaño', line=dict(color='red', width=2),
+            hovertemplate='%{y:.0f} t/h<extra>Sobretamaño</extra>'
         ))
         
-        # Objetivo
         fig.add_trace(go.Scatter(
             x=t, y=st.session_state.historial['F_target'],
-            name='Objetivo', line=dict(color='black', width=2, dash='dash')
+            name='Objetivo', line=dict(color='black', width=2, dash='dash'),
+            hovertemplate='%{y:.0f} t/h<extra>Objetivo</extra>'
         ))
     
     fig.update_layout(
@@ -342,7 +400,8 @@ def crear_grafico_balance():
         xaxis_title="Tiempo (horas)",
         yaxis_title="Flujo (t/h)",
         showlegend=True,
-        hovermode='x unified'
+        hovermode='x unified',
+        margin=dict(l=20, r=20, t=40, b=20)
     )
     
     return fig
@@ -354,18 +413,19 @@ def crear_grafico_masas():
     t = np.array(st.session_state.historial['t'])
     
     if len(t) > 1:
-        # Calcular masa esperada en equilibrio
-        k = 0.5
-        masa_equilibrio = np.array(st.session_state.historial['F_target']) / k
+        # Masa esperada en equilibrio teórico
+        masa_teorica = np.array(st.session_state.historial['F_target']) / st.session_state.params['k_descarga']
         
         fig.add_trace(go.Scatter(
             x=t, y=st.session_state.historial['M_sag'],
-            name='Masa Actual', line=dict(color='blue', width=3)
+            name='Masa Real', line=dict(color='blue', width=3),
+            hovertemplate='%{y:.0f} t<extra>Masa Real</extra>'
         ))
         
         fig.add_trace(go.Scatter(
-            x=t, y=masa_equilibrio,
-            name='Masa Esperada', line=dict(color='gray', width=2, dash='dash')
+            x=t, y=masa_teorica,
+            name='Masa Teórica', line=dict(color='gray', width=2, dash='dash'),
+            hovertemplate='%{y:.0f} t<extra>Masa Teórica</extra>'
         ))
         
         # Cobre (escala secundaria)
@@ -373,7 +433,8 @@ def crear_grafico_masas():
         fig.add_trace(go.Scatter(
             x=t, y=M_cu_kg,
             name='Cobre (kg)', line=dict(color='orange', width=2),
-            yaxis='y2'
+            yaxis='y2',
+            hovertemplate='%{y:.0f} kg<extra>Cobre</extra>'
         ))
     
     fig.update_layout(
@@ -385,7 +446,9 @@ def crear_grafico_masas():
             overlaying="y",
             side="right"
         ),
-        showlegend=True
+        showlegend=True,
+        hovermode='x unified',
+        margin=dict(l=20, r=60, t=40, b=20)
     )
     
     return fig
@@ -397,31 +460,43 @@ def crear_grafico_cobre():
     t = np.array(st.session_state.historial['t'])
     
     if len(t) > 1:
+        # Calcular ley del SAG
+        M_cu = np.array(st.session_state.historial['M_cu_sag'])
+        M_sag = np.array(st.session_state.historial['M_sag'])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            L_sag = np.where(M_sag > 0.1, M_cu / M_sag, 0)
+        
         # Flujos de cobre
         F_cu_chancado = np.array(st.session_state.historial['F_chancado']) * np.array(st.session_state.historial['L_chancado'])
-        F_cu_recirculacion = np.array(st.session_state.historial['F_sobre_tamano']) * np.array(st.session_state.historial['L_chancado'])
-        F_cu_total = F_cu_chancado + F_cu_recirculacion
+        F_cu_finos = np.array(st.session_state.historial['F_finos']) * L_sag
         
         fig.add_trace(go.Scatter(
             x=t, y=F_cu_chancado,
-            name='Cobre Chancado', line=dict(color='darkblue', width=2)
+            name='Cobre Chancado', line=dict(color='darkblue', width=2),
+            hovertemplate='%{y:.3f} t/h<extra>Cobre Chancado</extra>'
         ))
         
         fig.add_trace(go.Scatter(
-            x=t, y=F_cu_recirculacion,
-            name='Cobre Recirculación', line=dict(color='purple', width=2)
+            x=t, y=F_cu_finos,
+            name='Cobre Finos', line=dict(color='darkgreen', width=2),
+            hovertemplate='%{y:.3f} t/h<extra>Cobre Finos</extra>'
         ))
         
+        # Total
+        F_cu_total = F_cu_chancado + F_cu_finos
         fig.add_trace(go.Scatter(
             x=t, y=F_cu_total,
-            name='Cobre Total', line=dict(color='black', width=3, dash='dash')
+            name='Total', line=dict(color='black', width=1, dash='dot'),
+            hovertemplate='%{y:.3f} t/h<extra>Total Cobre</extra>'
         ))
     
     fig.update_layout(
         height=300,
         xaxis_title="Tiempo (horas)",
         yaxis_title="Flujo Cobre (t/h)",
-        showlegend=True
+        showlegend=True,
+        hovermode='x unified',
+        margin=dict(l=20, r=20, t=40, b=20)
     )
     
     return fig
@@ -433,7 +508,7 @@ def crear_grafico_leyes():
     t = np.array(st.session_state.historial['t'])
     
     if len(t) > 1:
-        # Ley del SAG
+        # Calcular ley del SAG
         M_cu = np.array(st.session_state.historial['M_cu_sag'])
         M_sag = np.array(st.session_state.historial['M_sag'])
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -441,26 +516,42 @@ def crear_grafico_leyes():
         
         fig.add_trace(go.Scatter(
             x=t, y=np.array(st.session_state.historial['L_chancado']) * 100,
-            name='Ley Alimentación', line=dict(color='blue', width=2)
+            name='Ley Chancado', line=dict(color='blue', width=2),
+            hovertemplate='%{y:.2f}%<extra>Ley Chancado</extra>'
         ))
         
         fig.add_trace(go.Scatter(
             x=t, y=L_sag,
-            name='Ley SAG', line=dict(color='orange', width=3)
+            name='Ley SAG', line=dict(color='orange', width=2),
+            hovertemplate='%{y:.2f}%<extra>Ley SAG</extra>'
         ))
         
-        # Objetivo
         fig.add_trace(go.Scatter(
             x=t, y=np.array(st.session_state.historial['L_target']) * 100,
-            name='Objetivo', line=dict(color='black', width=2, dash='dash')
+            name='Objetivo', line=dict(color='black', width=2, dash='dash'),
+            hovertemplate='%{y:.2f}%<extra>Objetivo Ley</extra>'
         ))
+    
+    # Calcular rango dinámico para el eje Y
+    if len(t) > 1:
+        todos_valores = list(np.array(st.session_state.historial['L_chancado']) * 100)
+        if len(L_sag) > 0:
+            todos_valores.extend(L_sag)
+        todos_valores.extend(np.array(st.session_state.historial['L_target']) * 100)
+        
+        y_min = max(0, min(todos_valores) * 0.9)
+        y_max = min(2.0, max(todos_valores) * 1.1)
+    else:
+        y_min, y_max = 0, 1.5
     
     fig.update_layout(
         height=300,
         xaxis_title="Tiempo (horas)",
         yaxis_title="Ley (%)",
-        yaxis=dict(range=[0, 1.5]),
-        showlegend=True
+        yaxis=dict(range=[y_min, y_max]),
+        showlegend=True,
+        hovermode='x unified',
+        margin=dict(l=20, r=20, t=40, b=20)
     )
     
     return fig
@@ -486,87 +577,77 @@ with col4:
     st.subheader("🔬 Comparación de Leyes")
     st.plotly_chart(crear_grafico_leyes(), use_container_width=True)
 
-# ================= INFORMACIÓN ADICIONAL =================
+# ================= INFORMACIÓN =================
 st.markdown("---")
 
-with st.expander("📚 **Teoría del Balance - ¡ESTO ES CLAVE!**"):
+with st.expander("📈 **Comportamiento Esperado**"):
     st.markdown("""
-    ### **¿Por qué la masa se estabiliza ahora?**
+    ### **✅ Variabilidad incluida (recuperada del código original):**
     
-    La ecuación fundamental del SAG es:
+    1. **Componente lenta**: Ondas sinusoidales largas (±2%)
+    2. **Componente media**: Ondas más rápidas (±1%)
+    3. **Componente rápida**: Ruido aleatorio (±0.5%)
+    4. **Perturbaciones**: Eventos aleatorios ocasionales (-4% a -10%)
+    5. **Variabilidad en ley**: ±8% alrededor del objetivo
     
-    ```
-    dM/dt = F_entrada - F_salida
-    ```
+    ### **🔄 Auto-avance activado:**
     
-    Donde:
-    - `F_entrada = F_chancado + F_recirculacion`
-    - `F_salida = k * M_sag`
+    - La simulación avanza **automáticamente** cuando está en estado EJECUTANDO
+    - 1 segundo real ≈ varios minutos simulados
+    - Los gráficos se actualizan en tiempo real
     
-    ### **En estado estacionario (dM/dt = 0):**
+    ### **⚖️ Balance de masa corregido:**
     
-    ```
-    F_entrada = k * M_sag
-    M_sag_equilibrio = F_entrada / k
-    ```
+    La masa se estabiliza en: **M = F_entrada / k**
     
-    ### **Parámetro k (constante de descarga):**
-    - **k = 0.5** → Toda la masa sale en 2 horas
-    - **k = 1.0** → Toda la masa sale en 1 hora
-    - **k = 2.0** → Toda la masa sale en 0.5 horas
-    
-    ### **Ejemplo:**
-    Si `F_entrada = 2000 t/h` y `k = 0.5`:
-    ```
-    M_sag_equilibrio = 2000 / 0.5 = 4000 toneladas
-    ```
-    
-    La masa se estabilizará alrededor de 4000 toneladas.
-    """)
-
-with st.expander("🎯 **Cómo usar el simulador**"):
-    st.markdown("""
-    1. **Ajusta el Flujo Objetivo** (500-5000 t/h)
-    2. **Ajusta la Ley Objetivo** (0.3-1.5%)
-    3. **Haz clic en INICIAR**
-    4. **Observa** cómo la masa busca su equilibrio
-    5. **Cambia los parámetros** en tiempo real
-    
-    ### **Indicadores de estabilidad:**
-    - ✅ **Balance cercano a 0** = Sistema estable
-    - 📈 **Masa convergiendo** = Buscando equilibrio
-    - 🔄 **Oscilaciones pequeñas** = Normal (debido a variabilidad)
+    Ejemplos:
+    - F=2000 t/h, k=0.5 → M=4000 toneladas
+    - F=1000 t/h, k=0.5 → M=2000 toneladas
+    - F=2000 t/h, k=1.0 → M=2000 toneladas
     """)
 
 # ================= PIE DE PÁGINA =================
 st.markdown("---")
-estado = st.session_state.estado
-F_alimentacion = estado['F_chancado'] + estado['F_sobre_tamano']
-k = 0.5
-F_descarga = k * estado['M_sag']
-M_equilibrio = F_alimentacion / k if k > 0 else 0
 
-col1, col2, col3 = st.columns(3)
+# Mostrar información de tiempo y estado
+estado = st.session_state.estado
+params = st.session_state.params
+F_alimentacion = estado['F_chancado'] + estado['F_sobre_tamano']
+F_descarga = params['k_descarga'] * estado['M_sag']
+M_equilibrio = F_alimentacion / params['k_descarga'] if params['k_descarga'] > 0 else 0
+balance = F_alimentacion - F_descarga
+
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Tiempo Simulado", f"{estado['tiempo']:.1f} h")
 with col2:
-    st.metric("Masa Actual", f"{estado['M_sag']:.0f} t")
+    velocidad = "60x" if st.session_state.simulando else "0x"
+    st.metric("Velocidad", velocidad)
 with col3:
-    st.metric("Masa Esperada", f"{M_equilibrio:.0f} t")
+    st.metric("Masa Actual", f"{estado['M_sag']:.0f} t")
+with col4:
+    st.metric("Equilibrio Esperado", f"{M_equilibrio:.0f} t")
 
-# Estado final
+# Mensaje de estado final
+st.markdown("---")
 if not st.session_state.simulando:
-    st.info("⏸️ Simulación pausada. Haz clic en INICIAR para comenzar.")
-elif abs(F_alimentacion - F_descarga) < 100:
-    st.success("✅ Sistema estable - En equilibrio dinámico")
+    st.info("⏸️ **Simulación PAUSADA** - Haz clic en **INICIAR** para comenzar la simulación automática")
+elif abs(balance) < 100:
+    st.success(f"✅ **Sistema ESTABLE** - Balance: {balance:.0f} t/h (Masa cercana al equilibrio)")
 else:
-    st.warning("🔄 Sistema buscando equilibrio...")
+    st.warning(f"🔄 **Sistema BUSCANDO equilibrio** - Balance: {balance:.0f} t/h")
 
-# ================= AUTO-ACTUALIZACIÓN CONTROLADA =================
-# Solo se actualiza si está simulando y ha pasado suficiente tiempo
+# ================= TRUCO FINAL: AUTO-ACTUALIZACIÓN GARANTIZADA =================
+# Este es el secreto: crear un placeholder que force la actualización periódica
 if st.session_state.simulando:
-    # Verificar si necesita actualizarse (cada 0.5 segundos)
-    tiempo_actual = time.time()
-    if tiempo_actual - st.session_state.ultimo_tiempo > 0.5:
-        # Usar st.rerun() correctamente
+    # Crear un contador oculto que fuerza la actualización
+    if 'contador_auto' not in st.session_state:
+        st.session_state.contador_auto = 0
+    
+    st.session_state.contador_auto += 1
+    
+    # Cada 2 incrementos, forzar un rerun si está simulando
+    if st.session_state.contador_auto % 2 == 0:
+        # Pequeña pausa para no sobrecargar
+        time.sleep(0.05)
         st.rerun()
