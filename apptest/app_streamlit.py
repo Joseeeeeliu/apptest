@@ -6,7 +6,7 @@ Interfaz web interactiva en tiempo real
 # 1. IMPORTAR BIBLIOTECAS NECESARIAS
 import streamlit as st
 import numpy as np
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import time
 from threading import Thread
 import plotly.graph_objects as go  # Plotly para gráficos interactivos
@@ -396,4 +396,5 @@ with st.expander("📚 **Información Técnica**"):
     - **Ley objetivo**: Concentración de cobre deseada
     - **Humedad SAG**: Porcentaje de agua en la pulpa del molino
     - **Recirculación**: Fracción de material que retorna al SAG
+
     """)
