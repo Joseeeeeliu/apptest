@@ -254,27 +254,22 @@ def reiniciar_simulacion():
     st.session_state.simulando = False
     st.session_state.pasos_ejecutados = 0
 
-# ================= AUTO-AVANCE: EL CORAZÓN DE LA SIMULACIÓN =================
+# ================= REEMPLAZA LA LÓGICA DE AUTO-AVANCE =================
+# Busca esta sección y reemplázala:
 
-# Esta es la parte CRÍTICA - se ejecuta en cada rerun
+# EJECUTAR SIMULACIÓN SI ESTÁ ACTIVA
 if st.session_state.simulando:
-    # Calcular cuántos pasos debemos ejecutar
     tiempo_actual = time.time()
-    tiempo_transcurrido = tiempo_actual - st.session_state.ultimo_update
     
-    # Queremos ejecutar ~10 pasos por segundo para que sea fluido
-    # 10 pasos/segundo = 600 pasos/minuto real = 600 minutos simulados/segundo real
-    pasos_por_segundo = 10
+    # Queremos 1 paso por segundo real
+    if st.session_state.ultima_actualizacion == 0:
+        st.session_state.ultima_actualizacion = tiempo_actual
     
-    pasos_a_ejecutar = int(tiempo_transcurrido * pasos_por_segundo)
-    
-    if pasos_a_ejecutar > 0:
-        # Ejecutar los pasos acumulados
-        for _ in range(pasos_a_ejecutar):
-            st.session_state.simulador.paso_simulacion()
-            st.session_state.pasos_ejecutados += 1
-        
-        st.session_state.ultimo_update = tiempo_actual
+    # Si ha pasado más de 1 segundo desde la última actualización
+    if tiempo_actual - st.session_state.ultima_actualizacion >= 1.0:
+        # Ejecutar exactamente 1 paso
+        simular_paso()
+        st.session_state.ultima_actualizacion = tiempo_actual
         
         # Forzar actualización de la interfaz
         st.rerun()
@@ -599,4 +594,5 @@ st.caption("""
 💡 **Nota:** La simulación avanza automáticamente cuando está activa. 
 Cada paso representa 1 minuto de operación. La velocidad actual es de ~10 pasos por segundo real.
 """)
+
 
