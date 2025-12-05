@@ -103,132 +103,97 @@ class SimuladorSAG:
         
         return F_nuevo, L_nuevo, (random_factor - 1) * 100
     
-    def paso_simulacion(self):
-        """Paso de simulación CON UNIDADES CORRECTAS"""
-        # 1. Alimentación
-        F_chancado, L_chancado, variacion = self.calcular_alimentacion()
-        
-        # 2. Guardar en buffer para retardos
-        self.buffer_F.append(F_chancado)
-        self.buffer_t.append(self.estado['t'])
-        
-        # 3. Recirculación (con retardo en horas)
-        F_sobre_tamano = 0.0
-        tau_rec_horas = self.params['tau_recirculacion'] / 60.0  # convertir minutos a horas
-        
-        if self.estado['t'] > tau_rec_horas:
-            # Buscar valor en el pasado
-            tiempo_pasado = self.estado['t'] - tau_rec_horas
-            # Encontrar el más cercano
-            if self.buffer_t:
-                diferencias = [abs(t - tiempo_pasado) for t in self.buffer_t]
-                idx_min = np.argmin(diferencias)
-                if idx_min < len(self.buffer_F):
-                    F_pasado = self.buffer_F[idx_min]
-                    F_sobre_tamano = self.params['fraccion_recirculacion'] * F_pasado
-        
-        # 4. Alimentación total
-        F_alimentacion_total = F_chancado + F_sobre_tamano
-        
-        # 5. Propiedades actuales SAG
-        M_sag = self.estado['M_sag']
-        W_sag = self.estado['W_sag']
-        M_cu_sag = self.estado['M_cu_sag']
-        
-        if M_sag > 0.001:
-            L_sag = M_cu_sag / M_sag
-            H_sag = W_sag / (M_sag + W_sag)
+# ================= REEMPLAZA ESTA FUNCIÓN =================
+# Busca la función simular_paso() que tenías (líneas ~80-200)
+# Y reemplázala por:
+
+def simular_paso():
+    """VERSIÓN SIMPLIFICADA PARA DEBUGGING - reemplaza la anterior"""
+    estado = st.session_state.estado
+    params = st.session_state.params
+    objetivos = st.session_state.objetivos
+    
+    dt = 1/60.0  # 1 minuto en horas
+    
+    # 1. FLUJO CON DINÁMICA SIMPLE (sin aleatoriedad inicial)
+    tau = 2.0  # 2 horas de constante de tiempo
+    error_F = objetivos['F_target'] - estado['F_chancado']
+    
+    # Limitar cambio máximo al inicio
+    if estado['tiempo'] < 1.0:  # Primera hora
+        max_cambio = objetivos['F_target'] * 0.05 * dt  # 5% por minuto
+        cambio_F = np.clip(error_F / tau * dt, -max_cambio, max_cambio)
+    else:
+        cambio_F = (error_F / tau) * dt
+    
+    estado['F_chancado'] += cambio_F
+    
+    # 2. RECIRCULACIÓN SIMPLIFICADA (sin retardo por ahora)
+    estado['F_sobre_tamano'] = params['fraccion_recirculacion'] * estado['F_chancado']
+    
+    # 3. CÁLCULOS BÁSICOS
+    F_alimentacion_total = estado['F_chancado'] + estado['F_sobre_tamano']
+    F_descarga = params['k_descarga'] * estado['M_sag']
+    estado['F_finos'] = max(F_descarga - estado['F_sobre_tamano'], 0)
+    
+    # 4. BALANCE DE MASA (ESTABLE - CON LÍMITES)
+    dM_dt = F_alimentacion_total - F_descarga
+    
+    # Limitar cambio máximo por paso (5% de la masa actual o 10 toneladas)
+    cambio_max = max(0.05 * estado['M_sag'], 10.0)
+    cambio_M = np.clip(dM_dt * dt, -cambio_max, cambio_max)
+    
+    estado['M_sag'] += cambio_M
+    estado['M_sag'] = max(estado['M_sag'], 10.0)  # Mínimo físico
+    
+    # 5. BALANCE DE COBRE SIMPLIFICADO
+    # Asumir ley constante por ahora
+    estado['L_chancado'] = objetivos['L_target']
+    
+    # Actualizar masa de cobre en SAG (simplificado)
+    if estado['M_sag'] > 0.1:
+        estado['M_cu_sag'] = estado['M_sag'] * estado['L_chancado']
+    else:
+        estado['M_cu_sag'] = 0.001
+    
+    # 6. BALANCE DE AGUA SIMPLIFICADO
+    # Humedad deseada: 30%
+    agua_necesaria = estado['M_sag'] * (params['humedad_sag'] / (1 - params['humedad_sag']))
+    estado['W_sag'] = agua_necesaria
+    
+    # 7. ACTUALIZAR TIEMPO
+    estado['tiempo'] += dt
+    
+    # 8. GUARDAR HISTORIAL (cada paso para debugging)
+    # Limitar tamaño para no saturar memoria
+    max_historial = 24 * 60  # 24 horas * 60 puntos/hora
+    
+    for key in ['t', 'M_sag', 'W_sag', 'M_cu_sag', 
+                'F_chancado', 'L_chancado', 'F_finos', 'F_sobre_tamano']:
+        if key == 't':
+            valor = estado['tiempo']
         else:
-            L_sag = L_chancado
-            H_sag = self.params['humedad_sag']
+            valor = estado[key]
         
-        # 6. Flujos de agua (t/h)
-        W_chancado = F_chancado * (self.params['humedad_alimentacion'] / 
-                                  (1 - self.params['humedad_alimentacion']))
-        W_recirculacion = F_sobre_tamano * (self.params['humedad_recirculacion'] / 
-                                          (1 - self.params['humedad_recirculacion']))
+        st.session_state.historial[key].append(valor)
         
-        # 7. Ley de alimentación combinada
-        if F_alimentacion_total > 0:
-            L_alimentacion_total = (L_chancado * F_chancado + L_sag * F_sobre_tamano) / F_alimentacion_total
-        else:
-            L_alimentacion_total = 0
-        
-        # 8. Agua adicional
-        agua_necesaria = F_alimentacion_total * (self.params['humedad_sag'] / 
-                                               (1 - self.params['humedad_sag']))
-        agua_disponible = W_chancado + W_recirculacion
-        W_adicional = max(0, agua_necesaria - agua_disponible)
-        
-        # 9. Descarga SAG (t/h) - ¡CORREGIDO!
-        F_descarga = self.params['k_descarga'] * M_sag  # t/h
-        
-        # 10. Finos (con retardo en horas)
-        F_finos = 0.0
-        tau_finos_horas = self.params['tau_finos'] / 60.0
-        
-        if self.estado['t'] > tau_finos_horas:
-            F_finos = max(F_descarga - F_sobre_tamano, 0)
-            
-            # Crecimiento gradual
-            if self.estado['t'] < tau_finos_horas + 1.0:
-                factor = 1 - np.exp(-(self.estado['t'] - tau_finos_horas) / 0.3)
-                F_finos *= factor
-        
-        # 11. Agua en descarga
-        W_descarga = F_descarga * (H_sag / (1 - H_sag))
-        
-        # 12. ECUACIONES DIFERENCIALES (CORREGIDAS - TODO EN t/h)
-        # dt está en horas, así que multiplicamos por dt directamente
-        dM_dt = F_alimentacion_total - F_descarga  # t/h
-        dW_dt = (W_chancado + W_recirculacion + W_adicional - W_descarga)  # t/h
-        dMcu_dt = (L_alimentacion_total * F_alimentacion_total - L_sag * F_descarga)  # t_cu/h
-        
-        # 13. INTEGRAR (Euler explícito)
-        self.estado['M_sag'] += dM_dt * self.dt
-        self.estado['W_sag'] += dW_dt * self.dt
-        self.estado['M_cu_sag'] += dMcu_dt * self.dt
-        self.estado['t'] += self.dt
-        self.estado['F_actual'] = F_chancado
-        self.estado['L_actual'] = L_chancado
-        self.estado['H_sag'] = H_sag
-        
-        # 14. GUARDAR EN HISTORIAL (cada 6 pasos = cada 10 segundos reales aprox)
-        if int(self.estado['t'] / self.dt) % 6 == 0:
-            self.historial['t'].append(self.estado['t'])
-            self.historial['M_sag'].append(self.estado['M_sag'])
-            self.historial['W_sag'].append(self.estado['W_sag'])
-            self.historial['M_cu_sag'].append(self.estado['M_cu_sag'])
-            self.historial['F_chancado'].append(F_chancado)
-            self.historial['L_chancado'].append(L_chancado)
-            self.historial['F_finos'].append(F_finos)
-            self.historial['F_sobre_tamano'].append(F_sobre_tamano)
-            self.historial['F_descarga'].append(F_descarga)
-            self.historial['L_sag'].append(L_sag)
-            self.historial['H_sag'].append(H_sag)
-            self.historial['F_target'].append(self.objetivos['F_target'])
-            self.historial['L_target'].append(self.objetivos['L_target'])
-            
-            # Limitar tamaño del historial (últimas 24 horas)
-            max_puntos = 24 * 60  # 1 punto por minuto
-            for key in self.historial:
-                if len(self.historial[key]) > max_puntos:
-                    self.historial[key] = self.historial[key][-max_puntos:]
-        
-        return {
-            'tiempo': self.estado['t'],
-            'M_sag': self.estado['M_sag'],
-            'W_sag': self.estado['W_sag'],
-            'M_cu_sag': self.estado['M_cu_sag'],
-            'F_chancado': F_chancado,
-            'L_chancado': L_chancado,
-            'F_finos': F_finos,
-            'F_sobre_tamano': F_sobre_tamano,
-            'F_descarga': F_descarga,
-            'L_sag': L_sag,
-            'H_sag': H_sag,
-            'variacion': variacion
-        }
+        if len(st.session_state.historial[key]) > max_historial:
+            st.session_state.historial[key] = st.session_state.historial[key][-max_historial:]
+    
+    # Guardar objetivos
+    st.session_state.historial['F_target'].append(objetivos['F_target'])
+    st.session_state.historial['L_target'].append(objetivos['L_target'])
+    
+    if len(st.session_state.historial['F_target']) > max_historial:
+        st.session_state.historial['F_target'] = st.session_state.historial['F_target'][-max_historial:]
+        st.session_state.historial['L_target'] = st.session_state.historial['L_target'][-max_historial:]
+    
+    # 9. DEBUG: Imprimir valores para diagnóstico
+    print(f"Tiempo: {estado['tiempo']:.2f}h | "
+          f"Masa: {estado['M_sag']:.0f}t | "
+          f"F_chancado: {estado['F_chancado']:.0f}t/h | "
+          f"F_descarga: {F_descarga:.0f}t/h | "
+          f"dM/dt: {dM_dt:.1f}t/h")
     
     def actualizar_objetivo(self, tipo, valor):
         if tipo == 'F':
@@ -634,3 +599,4 @@ st.caption("""
 💡 **Nota:** La simulación avanza automáticamente cuando está activa. 
 Cada paso representa 1 minuto de operación. La velocidad actual es de ~10 pasos por segundo real.
 """)
+
