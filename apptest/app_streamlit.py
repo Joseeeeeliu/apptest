@@ -398,3 +398,4 @@ with st.expander("📚 **Información Técnica**"):
     - **Recirculación**: Fracción de material que retorna al SAG
 
     """)
+
