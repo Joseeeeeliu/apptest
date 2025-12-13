@@ -1,6 +1,6 @@
 """
-SIMULADOR SAG EN TIEMPO REAL - VERSIÓN CORREGIDA (CAUSALIDAD CORRECTA)
-Chancado como variable exógena independiente - Sin retroalimentación
+SIMULADOR SAG EN TIEMPO REAL - VERSIÓN SIMPLIFICADA Y ESTABLE
+Chancado con variaciones senoidales simples - Sin acumulación
 """
 
 import numpy as np
@@ -22,13 +22,13 @@ class SimuladorSAG:
         
         # Estado inicial del sistema
         self.estado = {
-            't': 0.0,                    # Tiempo actual (horas)
-            'M_sag': 100.0,              # Masa de sólidos en SAG (ton)
-            'W_sag': 42.86,              # Masa de agua en SAG (ton)
-            'M_cu_sag': 0.72,            # Masa de cobre en SAG (ton)
-            'F_actual': params['F_nominal'],      # Flujo actual chancado (t/h)
-            'L_actual': params['L_nominal'],      # Ley actual (decimal)
-            'H_sag': params['humedad_sag']        # Humedad actual (decimal)
+            't': 0.0,                         # Tiempo actual (horas)
+            'M_sag': 100.0,                   # Masa de sólidos en SAG (ton)
+            'W_sag': 42.86,                   # Masa de agua en SAG (ton)
+            'M_cu_sag': 0.72,                 # Masa de cobre en SAG (ton)
+            'F_actual': params['F_nominal'],  # Flujo actual chancado (t/h)
+            'L_actual': params['L_nominal'],  # Ley actual (decimal)
+            'H_sag': params['humedad_sag']    # Humedad actual (decimal)
         }
         
         # Objetivos de operación
@@ -36,10 +36,6 @@ class SimuladorSAG:
             'F_target': params['F_nominal'],
             'L_target': params['L_nominal']
         }
-        
-        # Variables para random walk del chancado (INDEPENDIENTES)
-        self.F_drift = 0.0  # Deriva acumulada del flujo
-        self.L_drift = 0.0  # Deriva acumulada de la ley
         
         # Buffers para retardos
         self.buffer_F = deque(maxlen=10000)
@@ -64,10 +60,12 @@ class SimuladorSAG:
     
     def calcular_alimentacion_chancado(self, dt):
         """
-        Calcula el flujo y ley de CHANCADO (variables EXÓGENAS)
-        Estas NO dependen de nada más - son entrada pura al sistema
+        Calcula el flujo y ley de CHANCADO con variaciones senoidales simples
         
-        CAUSALIDAD: Mina → Chancado (independiente de SAG/Finos/etc)
+        FILOSOFÍA: Simple y efectivo
+        - Converge al objetivo con dinámica de primer orden
+        - Variaciones = ondas senoidales + ruido blanco pequeño
+        - NO hay acumulación, todo se aplica directamente
         
         Args:
             dt: Paso de tiempo en horas
@@ -76,64 +74,55 @@ class SimuladorSAG:
             tuple: (F_chancado, L_chancado) en t/h y decimal
         """
         
-        # ========== 1. FLUJO DE CHANCADO ==========
-        # Mean-reverting random walk hacia el objetivo
+        # ========== FLUJO DE CHANCADO ==========
         
-        # Fuerza de restauración hacia el objetivo (suave)
-        tau_objetivo = 2.0  # 2 horas para converger al objetivo
-        fuerza_restauracion = (self.objetivos['F_target'] - self.estado['F_actual']) / tau_objetivo
+        # 1. Dinámica de primer orden hacia el objetivo
+        tau_F = 1.0  # Constante de tiempo: 1 hora
+        F_base = self.estado['F_actual'] + (self.objetivos['F_target'] - self.estado['F_actual']) / tau_F * dt
         
-        # Componentes de variabilidad (SIEMPRE activas, desde t=0)
-        # Ondas sinusoidales de diferentes frecuencias
-        onda_lenta = 0.03 * np.sin(0.2 * self.estado['t'])           # Periodo ~31h
-        onda_media = 0.02 * np.sin(0.5 * self.estado['t'] + 1.2)     # Periodo ~13h
-        onda_rapida = 0.015 * np.sin(1.1 * self.estado['t'] + 2.5)   # Periodo ~6h
+        # 2. Variaciones senoidales (aplicadas directamente, NO acumuladas)
+        t = self.estado['t']
         
-        # Ruido blanco (Wiener process)
-        ruido = np.random.normal(0, 0.01)  # Desviación estándar 1%
+        # Ondas de diferentes frecuencias y amplitudes
+        onda1 = 0.03 * np.sin(0.2 * t)              # Periodo ~31h, amplitud 3%
+        onda2 = 0.02 * np.sin(0.5 * t + 1.2)        # Periodo ~13h, amplitud 2%
+        onda3 = 0.015 * np.sin(1.1 * t + 2.5)       # Periodo ~6h, amplitud 1.5%
         
-        # Variación total
-        variacion_F = onda_lenta + onda_media + onda_rapida + ruido
+        # Ruido blanco (pequeño)
+        ruido = np.random.normal(0, 0.005)          # Desviación estándar 0.5%
         
-        # Actualizar drift (acumulador de variación)
-        self.F_drift += variacion_F
+        # Suma de variaciones (en términos porcentuales)
+        variacion_total = onda1 + onda2 + onda3 + ruido
         
-        # Mean reversion del drift (para que no explote)
-        self.F_drift *= 0.98  # Decae 2% por paso
+        # 3. Aplicar variaciones al flujo objetivo (no al actual)
+        F_chancado = F_base * (1 + variacion_total)
         
-        # Flujo nuevo = objetivo + fuerza_restauracion + variaciones
-        F_chancado = (self.estado['F_actual'] + 
-                     fuerza_restauracion * dt + 
-                     self.F_drift * self.objetivos['F_target'])
-        
-        # Límites ABSOLUTOS (no relativos al objetivo)
-        # Rango físico razonable: 50% a 150% del nominal
-        F_min = 0.5 * self.params['F_nominal']
-        F_max = 1.5 * self.params['F_nominal']
+        # 4. Límites ABSOLUTOS (independientes del objetivo)
+        F_min = 0.5 * self.params['F_nominal']  # 1000 t/h
+        F_max = 1.5 * self.params['F_nominal']  # 3000 t/h
         F_chancado = np.clip(F_chancado, F_min, F_max)
         
         
-        # ========== 2. LEY DE CHANCADO ==========
-        # Exactamente la misma lógica, pero para ley
+        # ========== LEY DE CHANCADO ==========
         
-        tau_ley = 1.5  # 1.5 horas para converger
-        fuerza_restauracion_L = (self.objetivos['L_target'] - self.estado['L_actual']) / tau_ley
+        # 1. Dinámica de primer orden hacia el objetivo
+        tau_L = 1.0  # Constante de tiempo: 1 hora
+        L_base = self.estado['L_actual'] + (self.objetivos['L_target'] - self.estado['L_actual']) / tau_L * dt
         
-        # Variabilidad de ley (SIEMPRE activa)
-        onda_L1 = 0.025 * np.sin(0.4 * self.estado['t'] + 0.8)
-        onda_L2 = 0.015 * np.sin(0.9 * self.estado['t'] + 1.5)
-        ruido_L = np.random.normal(0, 0.008)  # 0.8% de ruido
+        # 2. Variaciones senoidales (diferentes frecuencias que el flujo)
+        onda_L1 = 0.025 * np.sin(0.4 * t + 0.8)     # Periodo ~16h, amplitud 2.5%
+        onda_L2 = 0.015 * np.sin(0.9 * t + 1.5)     # Periodo ~7h, amplitud 1.5%
+        onda_L3 = 0.01 * np.sin(1.3 * t + 3.0)      # Periodo ~5h, amplitud 1%
         
-        variacion_L = onda_L1 + onda_L2 + ruido_L
+        # Ruido blanco
+        ruido_L = np.random.normal(0, 0.004)        # Desviación estándar 0.4%
         
-        self.L_drift += variacion_L
-        self.L_drift *= 0.98  # Mean reversion
+        variacion_L_total = onda_L1 + onda_L2 + onda_L3 + ruido_L
         
-        L_chancado = (self.estado['L_actual'] + 
-                     fuerza_restauracion_L * dt + 
-                     self.L_drift * self.objetivos['L_target'])
+        # 3. Aplicar variaciones
+        L_chancado = L_base * (1 + variacion_L_total)
         
-        # Límites ABSOLUTOS para ley
+        # 4. Límites ABSOLUTOS
         L_min = 0.5 * self.params['L_nominal']
         L_max = 1.5 * self.params['L_nominal']
         L_chancado = np.clip(L_chancado, L_min, L_max)
@@ -203,12 +192,12 @@ class SimuladorSAG:
         """
         Ejecuta UN PASO de simulación
         
-        ORDEN DE CAUSALIDAD (CRÍTICO):
-        1. Calcular chancado (INDEPENDIENTE - no depende de nada)
-        2. Calcular recirculación (depende de chancado pasado)
-        3. Calcular balance SAG (depende de chancado + recirculación)
-        4. Calcular descarga (depende de masa SAG)
-        5. Calcular finos (depende de descarga)
+        ORDEN DE CAUSALIDAD:
+        1. Chancado (INDEPENDIENTE)
+        2. Recirculación (depende de chancado pasado)
+        3. Balance SAG (depende de chancado + recirculación)
+        4. Descarga (depende de masa SAG)
+        5. Finos (depende de descarga)
         
         Returns:
             dict: Estado actual del sistema
@@ -271,7 +260,7 @@ class SimuladorSAG:
         dMcu_dt = L_alimentacion_total * F_alimentacion_total - L_sag * F_descarga
         
         # ===== PASO 10: INTEGRACIÓN CON LÍMITES =====
-        # Limitar cambio máximo (2% por paso)
+        # Limitar cambio máximo (2% por paso para estabilidad)
         max_cambio_M = 0.02 * max(abs(M_sag), 10.0)
         max_cambio_W = 0.02 * max(abs(W_sag), 5.0)
         max_cambio_Mcu = 0.02 * max(abs(M_cu_sag), 0.1)
