@@ -28,15 +28,14 @@ if 'simulador' not in st.session_state:
     
     # Variables de control de la simulación
     st.session_state.simulando = False
-    st.session_state.ultimo_update = time.time()
     st.session_state.pasos_ejecutados = 0
     st.session_state.hora_inicio = time.time()
+    st.session_state.velocidad_sim = 0.5  # segundos entre pasos
 
 # ================= FUNCIONES DE CONTROL =================
 def iniciar_simulacion():
     """Inicia la simulación"""
     st.session_state.simulando = True
-    st.session_state.ultimo_update = time.time()
 
 def pausar_simulacion():
     """Pausa la simulación"""
@@ -48,23 +47,13 @@ def reiniciar_simulacion():
     st.session_state.simulador = SimuladorSAG(params)
     st.session_state.simulando = False
     st.session_state.pasos_ejecutados = 0
-    st.session_state.ultimo_update = time.time()
     st.session_state.hora_inicio = time.time()
 
-# ================= LÓGICA DE AUTO-AVANCE =================
-# Esta sección se ejecuta en cada ciclo de Streamlit
+# ================= EJECUTAR PASO DE SIMULACIÓN =================
+# Esta sección ejecuta un paso si la simulación está activa
 if st.session_state.simulando:
-    tiempo_actual = time.time()
-    
-    # Ejecutar 1 paso por segundo real
-    if tiempo_actual - st.session_state.ultimo_update >= 1.0:
-        # Ejecutar un paso de simulación
-        st.session_state.simulador.paso_simulacion()
-        st.session_state.pasos_ejecutados += 1
-        st.session_state.ultimo_update = tiempo_actual
-        
-        # Forzar actualización de la interfaz
-        st.rerun()
+    st.session_state.simulador.paso_simulacion()
+    st.session_state.pasos_ejecutados += 1
 
 # ================= INTERFAZ PRINCIPAL =================
 st.title("🏭 Simulador Planta Concentradora - Molino SAG")
@@ -97,6 +86,24 @@ with st.sidebar:
     st.button("🔄 Reiniciar",
              on_click=reiniciar_simulacion,
              use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Control de velocidad
+    st.subheader("⚡ Velocidad de Simulación")
+    velocidad_opciones = {
+        "Muy Lenta (2s/paso)": 2.0,
+        "Lenta (1s/paso)": 1.0,
+        "Normal (0.5s/paso)": 0.5,
+        "Rápida (0.2s/paso)": 0.2,
+        "Muy Rápida (0.1s/paso)": 0.1
+    }
+    velocidad_seleccionada = st.selectbox(
+        "Selecciona velocidad:",
+        options=list(velocidad_opciones.keys()),
+        index=2  # "Normal" por defecto
+    )
+    st.session_state.velocidad_sim = velocidad_opciones[velocidad_seleccionada]
     
     st.markdown("---")
     
@@ -438,7 +445,7 @@ with st.expander("📈 **Información del Sistema y Comportamiento Esperado**"):
         - **Tiempo simulado:** {estado['t']:.1f} horas
         - **Pasos ejecutados:** {st.session_state.pasos_ejecutados}
         - **Tiempo real transcurrido:** {time.time() - st.session_state.hora_inicio:.0f} segundos
-        - **Velocidad:** 1 paso/segundo real (60 minutos simulados por segundo real)
+        - **Velocidad:** {1/st.session_state.velocidad_sim:.1f} pasos/segundo
         
         ### **Balance de Masa:**
         
@@ -475,8 +482,8 @@ historial = st.session_state.simulador.obtener_historial()
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    velocidad = "1x" if st.session_state.simulando else "0x"
-    st.metric("Velocidad simulación", velocidad)
+    velocidad_display = f"{1/st.session_state.velocidad_sim:.1f}x" if st.session_state.simulando else "0x"
+    st.metric("Velocidad simulación", velocidad_display)
 
 with col2:
     st.metric("Tiempo simulado", f"{estado['t']:.1f} h")
@@ -513,7 +520,7 @@ if not st.session_state.simulando:
     ⏸️ **Simulación en pausa** 
     
     Haz clic en **▶️ INICIAR** para comenzar la simulación automática.
-    La simulación avanzará a 1 paso por segundo real (60 minutos simulados por segundo real).
+    La simulación avanzará continuamente según la velocidad seleccionada.
     """)
 else:
     # Calcular masa de equilibrio esperada (con verificación)
@@ -529,7 +536,7 @@ else:
     
     - Pasos ejecutados: **{st.session_state.pasos_ejecutados}**
     - Tiempo simulado: **{estado['t']:.1f} horas**
-    - Velocidad: **1 paso/segundo real**
+    - Velocidad: **{1/st.session_state.velocidad_sim:.1f} pasos/segundo**
     
     {masa_equilibrio_texto}
     """)
@@ -542,3 +549,10 @@ st.caption("""
 - Los cambios en los objetivos toman tiempo en reflejarse debido a la dinámica del sistema.
 - La masa en el molino SAG se estabiliza cuando: F_entrada = F_salida = k × M_sag
 """)
+
+# ================= AUTO-REFRESH (CRÍTICO) =================
+# ESTA SECCIÓN DEBE ESTAR AL FINAL DEL ARCHIVO
+# Se ejecuta siempre que la simulación esté activa
+if st.session_state.simulando:
+    time.sleep(st.session_state.velocidad_sim)
+    st.rerun()
