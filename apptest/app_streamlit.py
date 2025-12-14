@@ -1,6 +1,6 @@
 """
-SIMULADOR SAG - INTERFAZ STREAMLIT CORREGIDA
-Versión estable con auto-avance confiable y visualización en tiempo real
+SIMULADOR SAG - INTERFAZ STREAMLIT COMPLETA
+Versión con todos los controles para dinámica corregida
 """
 
 import streamlit as st
@@ -57,7 +57,7 @@ if st.session_state.simulando:
 
 # ================= INTERFAZ PRINCIPAL =================
 st.title("🏭 Simulador Planta Concentradora - Molino SAG")
-st.markdown("**Versión corregida con unidades consistentes y auto-avance estable**")
+st.markdown("**Versión corregida con arranque desde 0 y ley con límites amplios**")
 st.markdown("---")
 
 # ================= BARRA LATERAL =================
@@ -141,6 +141,10 @@ with st.sidebar:
     
     # ========== PARÁMETROS AVANZADOS ==========
     with st.expander("⚙️ **Parámetros Avanzados**"):
+        
+        # Sección: Parámetros físicos del sistema
+        st.subheader("🏗️ Parámetros del Sistema")
+        
         # Control de constante de descarga
         k_valor = st.slider(
             "Constante de descarga (k) [1/hora]",
@@ -177,6 +181,58 @@ with st.sidebar:
             step=10
         )
         st.session_state.simulador.params['tau_finos'] = tau_finos
+        
+        st.markdown("---")
+        
+        # Sección: Dinámica del chancado
+        st.subheader("⏱️ Dinámica del Chancado")
+        
+        # Constante de tiempo para flujo
+        tau_F = st.slider(
+            "Tau flujo (horas)",
+            0.5, 5.0,
+            float(st.session_state.simulador.tau_F),
+            0.1,
+            help="Constante de tiempo para ajuste del flujo. Valores más altos = respuesta más lenta"
+        )
+        st.session_state.simulador.tau_F = tau_F
+        
+        # Constante de tiempo para ley
+        tau_L = st.slider(
+            "Tau ley (horas)",
+            0.5, 5.0,
+            float(st.session_state.simulador.tau_L),
+            0.1,
+            help="Constante de tiempo para ajuste de la ley. Valores más altos = respuesta más lenta"
+        )
+        st.session_state.simulador.tau_L = tau_L
+        
+        st.markdown("---")
+        
+        # Sección: Variabilidad natural
+        st.subheader("📊 Variabilidad Natural")
+        
+        # Amplitud de variación de ley
+        amp_ley = st.slider(
+            "Amplitud variación ley (%)",
+            0.0, 5.0,
+            float(st.session_state.simulador.amplitud_variacion_ley * 100),
+            0.1,
+            format="%.1f",
+            help="Variación máxima de la ley (± porcentaje). 0% = sin variación"
+        )
+        st.session_state.simulador.amplitud_variacion_ley = amp_ley / 100.0
+        
+        # Amplitud de variación de flujo
+        amp_flujo = st.slider(
+            "Amplitud variación flujo (%)",
+            0.0, 2.0,
+            float(st.session_state.simulador.amplitud_variacion_flujo * 100),
+            0.1,
+            format="%.1f",
+            help="Variación máxima del flujo (± porcentaje). 0% = sin variación"
+        )
+        st.session_state.simulador.amplitud_variacion_flujo = amp_flujo / 100.0
     
     st.markdown("---")
     
@@ -202,7 +258,7 @@ with st.sidebar:
         else:
             st.metric("Finos actuales", "0 t/h")
     
-    # Indicador de equilibrio (con verificación)
+    # Indicador de equilibrio
     if historial['F_chancado'] and len(historial['F_chancado']) > 0:
         F_chancado_actual = historial['F_chancado'][-1]
         F_sobre_actual = historial['F_sobre_tamano'][-1] if historial['F_sobre_tamano'] and len(historial['F_sobre_tamano']) > 0 else 0
@@ -429,7 +485,7 @@ with st.expander("📈 **Información del Sistema y Comportamiento Esperado**"):
     estado = st.session_state.simulador.obtener_estado()
     params = st.session_state.simulador.params
     
-    # Cálculos de equilibrio (con verificación)
+    # Cálculos de equilibrio
     if historial['F_chancado'] and len(historial['F_chancado']) > 0:
         F_chancado_actual = historial['F_chancado'][-1]
         F_sobre_actual = historial['F_sobre_tamano'][-1] if historial['F_sobre_tamano'] and len(historial['F_sobre_tamano']) > 0 else 0
@@ -457,17 +513,25 @@ with st.expander("📈 **Información del Sistema y Comportamiento Esperado**"):
         
         ### **Comportamiento Esperado:**
         
-        1. **Masa estable:** Debería converger a **M = F_alimentacion / k**
-        2. **Variabilidad controlada:** Ondas sinusoidales suaves (±1%) después de 2 horas
-        3. **Respuesta a cambios:** Los ajustes de objetivos toman ~2-3 horas en reflejarse completamente
-        4. **Balance de cobre:** La ley del SAG sigue la ley de alimentación con cierto retardo
+        1. **Arranque desde 0:** Chancado comienza en 0 t/h
+        2. **Crecimiento gradual:** Sube exponencialmente hacia el objetivo (τ ≈ {st.session_state.simulador.tau_F:.1f} horas)
+        3. **Ley realista:** Comienza en ~{estado['L_actual']*100:.1f}% y sube gradualmente
+        4. **Variabilidad natural:** Ondas senoidales aparecen después de ~1 hora
+        5. **Límites amplios:** Ley puede variar entre 0-2.0% sin truncamiento
+        
+        ### **Parámetros Actuales:**
+        
+        - **τ_flujo:** {st.session_state.simulador.tau_F:.1f} horas
+        - **τ_ley:** {st.session_state.simulador.tau_L:.1f} horas  
+        - **Amplitud ley:** {st.session_state.simulador.amplitud_variacion_ley*100:.1f}%
+        - **Amplitud flujo:** {st.session_state.simulador.amplitud_variacion_flujo*100:.1f}%
         
         ### **Fórmulas Clave:**
         
-        - **Ecuación de descarga:** F_descarga = k × M_sag
-        - **Ecuación de masa:** dM/dt = F_entrada - F_salida
-        - **Masa de equilibrio:** M_equilibrio = F_entrada / k
-        - **Retardos:** Recirculación (τ_rec) y Finos (τ_finos) en minutos
+        - **Dinámica chancado:** dF/dt = (F_target - F) / τ_F
+        - **Dinámica ley:** dL/dt = (L_target - L) / τ_L
+        - **Descarga SAG:** F_descarga = k × M_sag
+        - **Equilibrio masa:** M_equilibrio = F_alimentacion / k
         """)
     else:
         st.info("Ejecuta la simulación para ver información del sistema")
@@ -475,7 +539,7 @@ with st.expander("📈 **Información del Sistema y Comportamiento Esperado**"):
 # ================= PIE DE PÁGINA =================
 st.markdown("---")
 
-# Métricas finales (con verificaciones)
+# Métricas finales
 estado = st.session_state.simulador.obtener_estado()
 historial = st.session_state.simulador.obtener_historial()
 
@@ -520,16 +584,16 @@ if not st.session_state.simulando:
     ⏸️ **Simulación en pausa** 
     
     Haz clic en **▶️ INICIAR** para comenzar la simulación automática.
-    La simulación avanzará continuamente según la velocidad seleccionada.
+    El chancado comenzará desde **0 t/h** y crecerá gradualmente hacia el objetivo.
     """)
 else:
-    # Calcular masa de equilibrio esperada (con verificación)
+    # Calcular masa de equilibrio esperada
     masa_equilibrio_texto = ""
     if historial['F_target'] and len(historial['F_target']) > 0 and st.session_state.simulador.params['k_descarga'] > 0:
         masa_equilibrio = historial['F_target'][-1] / st.session_state.simulador.params['k_descarga']
-        masa_equilibrio_texto = f"La masa debería estabilizarse en: **M = F_alimentacion / k ≈ {masa_equilibrio:.0f} toneladas**"
+        masa_equilibrio_texto = f"**Masa de equilibrio esperada:** M = F_alimentacion / k ≈ {masa_equilibrio:.0f} toneladas"
     else:
-        masa_equilibrio_texto = "La masa debería estabilizarse en: **M = F_alimentacion / k** (ejecuta la simulación para ver valores)"
+        masa_equilibrio_texto = "**Masa de equilibrio esperada:** M = F_alimentacion / k"
     
     st.success(f"""
     🔄 **Simulación en curso** 
@@ -545,13 +609,13 @@ else:
 st.caption("""
 💡 **Notas:** 
 - Cada paso de simulación representa 1 minuto de operación (dt = 1/60 horas).
-- La variabilidad aleatoria se activa después de 2 horas de simulación.
-- Los cambios en los objetivos toman tiempo en reflejarse debido a la dinámica del sistema.
-- La masa en el molino SAG se estabiliza cuando: F_entrada = F_salida = k × M_sag
+- El chancado comienza en **0 t/h** y crece exponencialmente hacia el objetivo.
+- La ley comienza en **~30% del objetivo** y se ajusta gradualmente.
+- Los límites físicos son: flujo 0-5000 t/h, ley 0-2.0%.
+- Las variaciones senoidales aparecen después de ~1 hora de simulación.
 """)
 
-# ================= AUTO-REFRESH (CRÍTICO) =================
-# ESTA SECCIÓN DEBE ESTAR AL FINAL DEL ARCHIVO
+# ================= AUTO-REFRESH =================
 # Se ejecuta siempre que la simulación esté activa
 if st.session_state.simulando:
     time.sleep(st.session_state.velocidad_sim)
