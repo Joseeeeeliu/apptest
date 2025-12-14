@@ -1,6 +1,6 @@
 """
-SIMULADOR SAG EN TIEMPO REAL - VERSIÓN CORREGIDA Y ESTABLE
-Chancado con arranque suave y dinámica mejorada
+SIMULADOR SAG EN TIEMPO REAL - VERSIÓN SIMPLIFICADA Y CORREGIDA
+Chancado con dinámica de primer orden pura
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ class SimuladorSAG:
             'W_sag': 42.86,                   # Masa de agua en SAG (ton)
             'M_cu_sag': 0.72,                 # Masa de cobre en SAG (ton)
             'F_actual': 0.0,                  # Flujo actual chancado (t/h) - EMPIEZA EN 0
-            'L_actual': params['L_nominal'] * 0.3,  # Ley actual (30% del nominal para arranque suave)
+            'L_actual': params['L_nominal'] * 0.3,  # Ley actual (30% del nominal)
             'H_sag': params['humedad_sag']    # Humedad actual (decimal)
         }
         
@@ -58,18 +58,19 @@ class SimuladorSAG:
         self.semilla_aleatoria = np.random.randint(1, 10000)
         np.random.seed(self.semilla_aleatoria)
         
-        # Variables para arranque suave
-        self.primera_ejecucion = True
+        # Parámetros de dinámica
+        self.tau_F = 2.0  # Constante de tiempo para flujo (horas)
+        self.tau_L = 2.0  # Constante de tiempo para ley (horas)
     
     def calcular_alimentacion_chancado(self, dt):
         """
-        Calcula el flujo y ley de CHANCADO con variaciones senoidales simples
+        Calcula el flujo y ley de CHANCADO con dinámica de primer orden pura
         
-        FILOSOFÍA CORREGIDA:
-        - Arranque suave desde valores bajos
-        - Converge al objetivo con dinámica de primer orden
-        - Variaciones = ondas senoidales + ruido blanco pequeño
-        - Variaciones solo después de estabilización
+        FILOSOFÍA SIMPLIFICADA:
+        1. Flujo: Dinámica de primer orden: dF/dt = (F_target - F) / tau_F
+        2. Ley: Dinámica de primer orden: dL/dt = (L_target - L) / tau_L
+        3. Sin variaciones aleatorias
+        4. Sin límites artificiales
         
         Args:
             dt: Paso de tiempo en horas
@@ -82,111 +83,39 @@ class SimuladorSAG:
         
         # ========== FLUJO DE CHANCADO ==========
         
-        # ARRANQUE SUAVE - Solo para los primeros 30 minutos
-        if t < 0.5:  # 0.5 horas = 30 minutos
-            # Subida suave desde 0 hasta el 50% del objetivo
-            factor_arranque = min(1.0, t / 0.5)  # Lineal de 0 a 1 en 0.5 horas
-            objetivo_arranque = self.objetivos['F_target'] * 0.5 * factor_arranque
-            
-            # Aplicar variaciones mínimas durante arranque
-            ruido_arranque = np.random.normal(0, 0.002)  # Muy pequeño
-            F_chancado = objetivo_arranque * (1 + ruido_arranque)
-            
-        else:
-            # FASE DE ESTABILIZACIÓN - Después de arranque
-            # Dinámica de primer orden hacia el objetivo
-            tau_F = 1.0  # Constante de tiempo: 1 hora
-            
-            # Diferencia entre objetivo y actual
-            diferencia = self.objetivos['F_target'] - self.estado['F_actual']
-            
-            # Cambio máximo permitido por paso (para evitar saltos bruscos)
-            cambio_max = self.objetivos['F_target'] * 0.1 * dt  # Máximo 10% del objetivo por hora
-            
-            # Calcular cambio con limitación
-            cambio = np.clip(diferencia / tau_F * dt, -cambio_max, cambio_max)
-            
-            F_base = self.estado['F_actual'] + cambio
-            
-            # VARIACIONES (solo después de 1 hora de simulación)
-            if t > 1.0:
-                # Ondas de diferentes frecuencias y amplitudes
-                onda1 = 0.03 * np.sin(0.2 * t)              # Periodo ~31h, amplitud 3%
-                onda2 = 0.02 * np.sin(0.5 * t + 1.2)        # Periodo ~13h, amplitud 2%
-                onda3 = 0.015 * np.sin(1.1 * t + 2.5)       # Periodo ~6h, amplitud 1.5%
-                
-                # Ruido blanco (pequeño)
-                ruido = np.random.normal(0, 0.005)          # Desviación estándar 0.5%
-                
-                # Suma de variaciones (en términos porcentuales)
-                variacion_total = onda1 + onda2 + onda3 + ruido
-                
-                # Aplicar variaciones con factor que depende de qué tan cerca estamos del objetivo
-                proximidad_al_objetivo = 1 - min(1.0, abs(diferencia) / self.objetivos['F_target'])
-                variacion_total *= proximidad_al_objetivo
-            else:
-                variacion_total = 0
-            
-            # Aplicar variaciones
-            F_chancado = F_base * (1 + variacion_total)
+        # Dinámica de primer orden SIMPLE
+        # dF/dt = (F_target - F) / tau_F
+        F_target = self.objetivos['F_target']
+        F_actual = self.estado['F_actual']
         
-        # Límites ABSOLUTOS
-        F_min = 500.0  # Mínimo 500 t/h
-        F_max = 5000.0  # Máximo 5000 t/h
-        F_chancado = np.clip(F_chancado, F_min, F_max)
+        # Calcular cambio basado en diferencia con objetivo
+        cambio_F = (F_target - F_actual) / self.tau_F * dt
         
+        # Aplicar cambio
+        F_chancado = F_actual + cambio_F
+        
+        # Límites FÍSICOS absolutos (no basados en objetivo)
+        # Mínimo: 0 t/h (no se puede alimentar negativo)
+        # Máximo: 5000 t/h (capacidad máxima física)
+        F_chancado = max(0.0, min(F_chancado, 5000.0))
         
         # ========== LEY DE CHANCADO ==========
         
-        # ARRANQUE SUAVE para ley
-        if t < 0.5:
-            # Subida suave desde 30% del nominal hasta 60%
-            factor_arranque_L = min(1.0, t / 0.5)
-            objetivo_arranque_L = self.objetivos['L_target'] * (0.3 + 0.3 * factor_arranque_L)
-            
-            ruido_arranque_L = np.random.normal(0, 0.001)  # Muy pequeño
-            L_chancado = objetivo_arranque_L * (1 + ruido_arranque_L)
-            
-        else:
-            # FASE DE ESTABILIZACIÓN
-            tau_L = 1.5  # Constante de tiempo: 1.5 horas (más lenta que el flujo)
-            
-            # Diferencia entre objetivo y actual
-            diferencia_L = self.objetivos['L_target'] - self.estado['L_actual']
-            
-            # Cambio máximo permitido por paso
-            cambio_max_L = self.objetivos['L_target'] * 0.05 * dt  # Máximo 5% del objetivo por hora
-            
-            # Calcular cambio con limitación
-            cambio_L = np.clip(diferencia_L / tau_L * dt, -cambio_max_L, cambio_max_L)
-            
-            L_base = self.estado['L_actual'] + cambio_L
-            
-            # VARIACIONES para ley (solo después de 1.5 horas)
-            if t > 1.5:
-                # Ondas de diferentes frecuencias
-                onda_L1 = 0.025 * np.sin(0.4 * t + 0.8)     # Periodo ~16h, amplitud 2.5%
-                onda_L2 = 0.015 * np.sin(0.9 * t + 1.5)     # Periodo ~7h, amplitud 1.5%
-                onda_L3 = 0.01 * np.sin(1.3 * t + 3.0)      # Periodo ~5h, amplitud 1%
-                
-                # Ruido blanco
-                ruido_L = np.random.normal(0, 0.004)        # Desviación estándar 0.4%
-                
-                variacion_L_total = onda_L1 + onda_L2 + onda_L3 + ruido_L
-                
-                # Factor de proximidad al objetivo
-                proximidad_al_objetivo_L = 1 - min(1.0, abs(diferencia_L) / self.objetivos['L_target'])
-                variacion_L_total *= proximidad_al_objetivo_L
-            else:
-                variacion_L_total = 0
-            
-            # Aplicar variaciones
-            L_chancado = L_base * (1 + variacion_L_total)
+        # Dinámica de primer orden SIMPLE
+        # dL/dt = (L_target - L) / tau_L
+        L_target = self.objetivos['L_target']
+        L_actual = self.estado['L_actual']
         
-        # Límites para la ley
-        L_min = 0.003  # Mínimo 0.3%
-        L_max = 0.015  # Máximo 1.5%
-        L_chancado = np.clip(L_chancado, L_min, L_max)
+        # Calcular cambio basado en diferencia con objetivo
+        cambio_L = (L_target - L_actual) / self.tau_L * dt
+        
+        # Aplicar cambio
+        L_chancado = L_actual + cambio_L
+        
+        # Límites FÍSICOS absolutos
+        # Mínimo: 0.3% (0.003) - ley mínima realista
+        # Máximo: 1.5% (0.015) - ley máxima realista
+        L_chancado = max(0.003, min(L_chancado, 0.015))
         
         # Guardar valores actuales para referencia futura
         self.estado['F_actual'] = F_chancado
@@ -245,11 +174,6 @@ class SimuladorSAG:
         if self.estado['t'] < tau_finos_horas:
             factor = self.estado['t'] / tau_finos_horas
             F_finos *= factor
-        elif self.estado['t'] < tau_finos_horas + 1.0:
-            # Transición suave
-            t_trans = self.estado['t'] - tau_finos_horas
-            factor = 1 - 0.3 * np.exp(-t_trans / 0.3)
-            F_finos *= factor
         
         return max(0.0, F_finos)
     
@@ -258,14 +182,11 @@ class SimuladorSAG:
         Ejecuta UN PASO de simulación
         
         ORDEN DE CAUSALIDAD:
-        1. Chancado (INDEPENDIENTE)
+        1. Chancado (EXÓGENO - dinámica de primer orden pura)
         2. Recirculación (depende de chancado pasado)
         3. Balance SAG (depende de chancado + recirculación)
         4. Descarga (depende de masa SAG)
         5. Finos (depende de descarga)
-        
-        Returns:
-            dict: Estado actual del sistema
         """
         
         # ===== PASO 1: CHANCADO (EXÓGENO) =====
@@ -324,22 +245,17 @@ class SimuladorSAG:
         dW_dt = W_chancado + W_recirculacion + W_adicional - W_descarga
         dMcu_dt = L_alimentacion_total * F_alimentacion_total - L_sag * F_descarga
         
-        # ===== PASO 10: INTEGRACIÓN CON LÍMITES =====
-        # Limitar cambio máximo (2% por paso para estabilidad)
-        max_cambio_M = 0.02 * max(abs(M_sag), 10.0)
-        max_cambio_W = 0.02 * max(abs(W_sag), 5.0)
-        max_cambio_Mcu = 0.02 * max(abs(M_cu_sag), 0.1)
+        # ===== PASO 10: INTEGRACIÓN =====
+        self.estado['M_sag'] += dM_dt * self.dt
+        self.estado['W_sag'] += dW_dt * self.dt
+        self.estado['M_cu_sag'] += dMcu_dt * self.dt
         
-        cambio_M = np.clip(dM_dt * self.dt, -max_cambio_M, max_cambio_M)
-        cambio_W = np.clip(dW_dt * self.dt, -max_cambio_W, max_cambio_W)
-        cambio_Mcu = np.clip(dMcu_dt * self.dt, -max_cambio_Mcu, max_cambio_Mcu)
+        # Asegurar valores positivos
+        self.estado['M_sag'] = max(10.0, self.estado['M_sag'])
+        self.estado['W_sag'] = max(1.0, self.estado['W_sag'])
+        self.estado['M_cu_sag'] = max(0.0, self.estado['M_cu_sag'])
         
-        # Aplicar cambios con límites físicos
-        self.estado['M_sag'] = max(10.0, self.estado['M_sag'] + cambio_M)
-        self.estado['W_sag'] = max(1.0, self.estado['W_sag'] + cambio_W)
-        self.estado['M_cu_sag'] = max(0.0, self.estado['M_cu_sag'] + cambio_Mcu)
-        
-        # ===== PASO 11: ACTUALIZAR ESTADO =====
+        # ===== PASO 11: ACTUALIZAR TIEMPO =====
         self.estado['t'] += self.dt
         self.estado['H_sag'] = H_sag
         
@@ -366,7 +282,6 @@ class SimuladorSAG:
                 if len(self.historial[key]) > max_puntos:
                     self.historial[key] = self.historial[key][-max_puntos:]
         
-        # ===== RETORNAR ESTADO =====
         return {
             'tiempo': self.estado['t'],
             'M_sag': self.estado['M_sag'],
@@ -399,18 +314,12 @@ class SimuladorSAG:
     
     def reset(self):
         """Reinicia la simulación a condiciones iniciales"""
-        # Guardar parámetros actuales
         params = self.params.copy()
-        # Crear nueva instancia con los mismos parámetros
         self.__init__(params)
-        # Asegurar que los objetivos se mantengan actualizados
-        self.objetivos['F_target'] = params['F_nominal']
-        self.objetivos['L_target'] = params['L_nominal']
     
     def obtener_estado(self):
         """Retorna una copia del estado actual"""
         estado = self.estado.copy()
-        # Añadir información adicional para la interfaz
         estado['F_actual'] = self.estado['F_actual']
         estado['L_actual'] = self.estado['L_actual']
         estado['M_sag'] = self.estado['M_sag']
