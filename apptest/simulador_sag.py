@@ -1,6 +1,6 @@
 """
-SIMULADOR SAG EN TIEMPO REAL - VERSIÓN CON ARRANQUE GRADUAL
-Retardos realistas con transición suave + variaciones senoidales en ley
+SIMULADOR SAG EN TIEMPO REAL - VERSIÓN COMPLETAMENTE CORREGIDA
+Chancado con arranque desde 0, ley con límites amplios y dinámica correcta
 """
 
 import numpy as np
@@ -20,14 +20,14 @@ class SimuladorSAG:
         """
         self.params = params.copy()
         
-        # Estado inicial del sistema
+        # Estado inicial del sistema - CORREGIDO: Chancado comienza en 0
         self.estado = {
             't': 0.0,                         # Tiempo actual (horas)
             'M_sag': 100.0,                   # Masa de sólidos en SAG (ton)
             'W_sag': 42.86,                   # Masa de agua en SAG (ton)
             'M_cu_sag': 0.72,                 # Masa de cobre en SAG (ton)
-            'F_actual': params['F_nominal'],  # Flujo actual chancado (t/h)
-            'L_actual': params['L_nominal'],  # Ley actual (decimal)
+            'F_actual': 0.0,                  # Flujo actual chancado (t/h) - ¡COMIENZA EN 0!
+            'L_actual': params['L_nominal'] * 0.3,  # Ley actual (30% del nominal)
             'H_sag': params['humedad_sag']    # Humedad actual (decimal)
         }
         
@@ -38,12 +38,12 @@ class SimuladorSAG:
         }
         
         # Parámetros de dinámica (ajustables desde UI)
-        self.tau_F = 1.0  # Constante de tiempo para flujo (horas)
-        self.tau_L = 1.0  # Constante de tiempo para ley (horas)
+        self.tau_F = 2.0  # Constante de tiempo para flujo (horas) - más lento para suavizar
+        self.tau_L = 2.0  # Constante de tiempo para ley (horas)
         
-        # Parámetros de variabilidad
-        self.amplitud_variacion_ley = 0.03  # ±3% de variación en ley
-        self.amplitud_variacion_flujo = 0.0  # Sin variación en flujo por defecto
+        # Parámetros de variabilidad - CORREGIDO: Amplitudes realistas
+        self.amplitud_variacion_ley = 0.01    # ±1% de variación en ley (10% del valor)
+        self.amplitud_variacion_flujo = 0.0   # Sin variación en flujo por defecto
         
         # Buffers para retardos
         self.buffer_F = deque(maxlen=10000)
@@ -65,11 +65,19 @@ class SimuladorSAG:
         self.dt = 1/60.0  # 1 minuto en horas
         self.semilla_aleatoria = np.random.randint(1, 10000)
         np.random.seed(self.semilla_aleatoria)
+        
+        # Estado interno para control de arranque
+        self.fase_arranque = True  # Para comportamiento especial durante arranque
     
     def calcular_alimentacion_chancado(self, dt):
         """
-        Calcula el flujo y ley de CHANCADO con dinámica de primer orden
-        + variaciones senoidales en la ley
+        Calcula el flujo y ley de CHANCADO con dinámica correcta
+        
+        CAMBIOS PRINCIPALES:
+        1. Chancado parte de 0 y crece gradualmente
+        2. Ley tiene límites amplios (0-2.0%) para no truncar ondas
+        3. Dinámica de primer orden pura hacia objetivos
+        4. Variaciones senoidales naturales
         
         Args:
             dt: Paso de tiempo en horas
@@ -81,59 +89,76 @@ class SimuladorSAG:
         t = self.estado['t']
         
         # ========== FLUJO DE CHANCADO ==========
+        # Dinámica de primer orden: dF/dt = (F_target - F) / τ_F
         
-        # Dinámica de primer orden simple
+        # Objetivo actual
         F_target = self.objetivos['F_target']
         F_actual = self.estado['F_actual']
         
+        # Calcular cambio (limitado para estabilidad)
+        cambio_max_F = F_target * 0.05 * dt  # Máximo 5% del objetivo por hora
         cambio_F = (F_target - F_actual) / self.tau_F * dt
+        
+        # Limitar cambio para evitar oscilaciones
+        cambio_F = np.clip(cambio_F, -cambio_max_F, cambio_max_F)
+        
         F_base = F_actual + cambio_F
         
-        # Variaciones senoidales en flujo (opcional, por defecto 0%)
-        if self.amplitud_variacion_flujo > 0:
-            onda_F1 = 0.5 * np.sin(0.2 * t)
-            onda_F2 = 0.3 * np.sin(0.5 * t + 1.2)
-            onda_F3 = 0.2 * np.sin(1.1 * t + 2.5)
+        # Variaciones en flujo (opcional)
+        if self.amplitud_variacion_flujo > 0 and t > 2.0:  # Solo después de estabilización
+            # Ondas de diferentes frecuencias
+            onda_F1 = 0.4 * np.sin(0.15 * t)
+            onda_F2 = 0.3 * np.sin(0.35 * t + 1.0)
+            onda_F3 = 0.3 * np.sin(0.8 * t + 2.0)
             
-            # Normalizar ondas (máximo ±1.0)
+            # Combinación normalizada
             variacion_F = (onda_F1 + onda_F2 + onda_F3) / 1.0
-            
             F_chancado = F_base * (1 + self.amplitud_variacion_flujo * variacion_F)
         else:
             F_chancado = F_base
         
-        # Límites físicos absolutos
-        F_chancado = max(0.0, min(F_chancado, 5000.0))
+        # Límites físicos absolutos (capacidad del sistema)
+        # Mínimo: 0 t/h (no se puede alimentar negativo)
+        # Máximo: 5000 t/h (capacidad máxima física)
+        F_chancado = np.clip(F_chancado, 0.0, 5000.0)
         
         
         # ========== LEY DE CHANCADO ==========
+        # Dinámica de primer orden: dL/dt = (L_target - L) / τ_L
         
-        # Dinámica de primer orden hacia el objetivo
         L_target = self.objetivos['L_target']
         L_actual = self.estado['L_actual']
         
+        # Calcular cambio (limitado para estabilidad)
+        cambio_max_L = L_target * 0.03 * dt  # Máximo 3% del objetivo por hora
         cambio_L = (L_target - L_actual) / self.tau_L * dt
+        cambio_L = np.clip(cambio_L, -cambio_max_L, cambio_max_L)
+        
         L_base = L_actual + cambio_L
         
-        # Variaciones senoidales en ley (SIEMPRE activas)
-        # Tres componentes de diferente frecuencia
-        onda_L1 = 0.5 * np.sin(0.4 * t + 0.8)      # Periodo ~16h
-        onda_L2 = 0.3 * np.sin(0.9 * t + 1.5)      # Periodo ~7h
-        onda_L3 = 0.2 * np.sin(1.3 * t + 3.0)      # Periodo ~5h
+        # Variaciones senoidales en ley (siempre activas después de arranque)
+        if t > 1.0:  # Después de 1 hora
+            # Tres componentes con diferentes frecuencias
+            # Normalizadas para que suma esté en [-1, 1]
+            onda_L1 = 0.4 * np.sin(0.2 * t + 0.5)      # Periodo ~31h
+            onda_L2 = 0.3 * np.sin(0.5 * t + 1.2)      # Periodo ~13h
+            onda_L3 = 0.3 * np.sin(0.9 * t + 2.5)      # Periodo ~7h
+            
+            # Ruido pequeño
+            ruido_L = np.random.normal(0, 0.02)  # ±2% ruido
+            
+            # Combinar
+            variacion_L = (onda_L1 + onda_L2 + onda_L3) / 1.0 + ruido_L
+            L_variada = L_base * (1 + self.amplitud_variacion_ley * variacion_L)
+        else:
+            L_variada = L_base
         
-        # Ruido blanco pequeño
-        ruido_L = np.random.normal(0, 0.05)
+        # Límites físicos amplios para no truncar ondas
+        # Mínimo: 0% (no puede ser negativo)
+        # Máximo: 2.0% (límite físico realista)
+        L_chancado = np.clip(L_variada, 0.0, 0.02)
         
-        # Normalizar (máximo ±1.0)
-        variacion_L = (onda_L1 + onda_L2 + onda_L3 + ruido_L) / 1.0
-        
-        # Aplicar amplitud controlada
-        L_chancado = L_base * (1 + self.amplitud_variacion_ley * variacion_L)
-        
-        # Límites físicos absolutos
-        L_chancado = max(0.003, min(L_chancado, 0.015))
-        
-        # Actualizar estado
+        # Actualizar estado interno
         self.estado['F_actual'] = F_chancado
         self.estado['L_actual'] = L_chancado
         
@@ -142,17 +167,6 @@ class SimuladorSAG:
     def calcular_recirculacion(self, F_chancado_actual):
         """
         Calcula la recirculación con retardo de tiempo y arranque gradual
-        
-        OPCIÓN B: Arranque gradual
-        - t < tau_rec: retorno = 0 (aún no llega nada)
-        - tau_rec <= t < tau_rec + 15min: transición gradual 0% → 100%
-        - t >= tau_rec + 15min: retorno = valor completo
-        
-        Args:
-            F_chancado_actual: Flujo actual de chancado (t/h)
-            
-        Returns:
-            float: Flujo de sobretamaño (t/h)
         """
         # Agregar valor actual al buffer
         self.buffer_F.append(F_chancado_actual)
@@ -167,7 +181,7 @@ class SimuladorSAG:
         
         # CASO 1: Aún no ha pasado el tiempo de retardo
         if self.estado['t'] < tau_rec_horas:
-            return 0.0  # No hay recirculación aún
+            return 0.0
         
         # CASO 2: Buscar valor en el buffer
         F_recirculacion_ideal = 0.0
@@ -186,7 +200,7 @@ class SimuladorSAG:
             # Transición gradual: 0% → 100% en 15 minutos
             tiempo_desde_inicio = self.estado['t'] - tau_rec_horas
             factor_arranque = tiempo_desde_inicio / tiempo_transicion
-            factor_arranque = max(0.0, min(1.0, factor_arranque))  # Clip [0, 1]
+            factor_arranque = np.clip(factor_arranque, 0.0, 1.0)
             
             return F_recirculacion_ideal * factor_arranque
         
@@ -196,18 +210,6 @@ class SimuladorSAG:
     def calcular_finos(self, F_descarga, F_sobre_tamano):
         """
         Calcula producción de finos con retardo y arranque gradual
-        
-        OPCIÓN B: Arranque gradual
-        - t < tau_finos: finos = 0 (aún no sale nada)
-        - tau_finos <= t < tau_finos + 15min: transición gradual 0% → 100%
-        - t >= tau_finos + 15min: finos = valor completo
-        
-        Args:
-            F_descarga: Flujo de descarga del SAG (t/h)
-            F_sobre_tamano: Flujo de sobretamaño (t/h)
-            
-        Returns:
-            float: Flujo de finos (t/h)
         """
         tau_finos_horas = self.params['tau_finos'] / 60.0
         tiempo_transicion = 15.0 / 60.0  # 15 minutos de transición
@@ -218,14 +220,13 @@ class SimuladorSAG:
         
         # CASO 1: Aún no ha pasado el tiempo de retardo
         if self.estado['t'] < tau_finos_horas:
-            return 0.0  # No hay producción de finos aún
+            return 0.0
         
         # CASO 2: Transición gradual
         elif self.estado['t'] < tau_finos_horas + tiempo_transicion:
-            # Rampa lineal: 0% → 100% en 15 minutos
             tiempo_desde_inicio = self.estado['t'] - tau_finos_horas
             factor_arranque = tiempo_desde_inicio / tiempo_transicion
-            factor_arranque = max(0.0, min(1.0, factor_arranque))
+            factor_arranque = np.clip(factor_arranque, 0.0, 1.0)
             
             return F_finos_ideal * factor_arranque
         
@@ -236,9 +237,6 @@ class SimuladorSAG:
     def paso_simulacion(self):
         """
         Ejecuta UN PASO de simulación
-        
-        Returns:
-            dict: Estado actual del sistema
         """
         
         # ===== PASO 1: CHANCADO =====
@@ -283,7 +281,7 @@ class SimuladorSAG:
         # ===== PASO 6: DESCARGA DEL SAG =====
         F_descarga = self.params['k_descarga'] * M_sag
         
-        # ===== PASO 7: FINOS (con arranque gradual) =====
+        # ===== PASO 7: FINOS =====
         F_finos = self.calcular_finos(F_descarga, F_sobre_tamano)
         
         # ===== PASO 8: AGUA EN DESCARGA =====
@@ -299,6 +297,7 @@ class SimuladorSAG:
         self.estado['W_sag'] += dW_dt * self.dt
         self.estado['M_cu_sag'] += dMcu_dt * self.dt
         
+        # Límites físicos mínimos
         self.estado['M_sag'] = max(10.0, self.estado['M_sag'])
         self.estado['W_sag'] = max(1.0, self.estado['W_sag'])
         self.estado['M_cu_sag'] = max(0.0, self.estado['M_cu_sag'])
@@ -307,9 +306,9 @@ class SimuladorSAG:
         self.estado['t'] += self.dt
         self.estado['H_sag'] = H_sag
         
-        # ===== PASO 12: GUARDAR HISTORIAL =====
+        # ===== PASO 12: GUARDAR HISTORIAL (cada 6 minutos) =====
         if int(self.estado['t'] / self.dt) % 6 == 0:
-            max_puntos = 24 * 60
+            max_puntos = 24 * 60  # 24 horas de datos
             
             self.historial['t'].append(self.estado['t'])
             self.historial['M_sag'].append(self.estado['M_sag'])
@@ -325,6 +324,7 @@ class SimuladorSAG:
             self.historial['F_target'].append(self.objetivos['F_target'])
             self.historial['L_target'].append(self.objetivos['L_target'])
             
+            # Mantener tamaño manejable
             for key in self.historial:
                 if len(self.historial[key]) > max_puntos:
                     self.historial[key] = self.historial[key][-max_puntos:]
@@ -358,7 +358,15 @@ class SimuladorSAG:
     
     def obtener_estado(self):
         """Retorna estado actual"""
-        return self.estado.copy()
+        estado = self.estado.copy()
+        # Asegurar que todos los campos necesarios estén presentes
+        estado['F_actual'] = self.estado.get('F_actual', 0.0)
+        estado['L_actual'] = self.estado.get('L_actual', 0.0)
+        estado['M_sag'] = self.estado.get('M_sag', 100.0)
+        estado['W_sag'] = self.estado.get('W_sag', 42.86)
+        estado['H_sag'] = self.estado.get('H_sag', 0.3)
+        estado['t'] = self.estado.get('t', 0.0)
+        return estado
     
     def obtener_historial(self):
         """Retorna historial completo"""
@@ -368,13 +376,13 @@ class SimuladorSAG:
 def crear_parametros_default():
     """Parámetros por defecto"""
     return {
-        'F_nominal': 2000.0,
-        'L_nominal': 0.0072,
-        'fraccion_recirculacion': 0.11,
-        'humedad_alimentacion': 0.035,
-        'humedad_sag': 0.30,
-        'humedad_recirculacion': 0.08,
-        'k_descarga': 0.5,
-        'tau_recirculacion': 90,
-        'tau_finos': 48
+        'F_nominal': 2000.0,          # Flujo nominal (t/h)
+        'L_nominal': 0.0072,          # Ley nominal (0.72%)
+        'fraccion_recirculacion': 0.11,  # 11% de recirculación
+        'humedad_alimentacion': 0.035,   # 3.5% humedad alimentación
+        'humedad_sag': 0.30,          # 30% humedad SAG
+        'humedad_recirculacion': 0.08,   # 8% humedad recirculación
+        'k_descarga': 0.5,            # Constante de descarga (1/h)
+        'tau_recirculacion': 90,      # Retardo recirculación (minutos)
+        'tau_finos': 48               # Retardo finos (minutos)
     }
