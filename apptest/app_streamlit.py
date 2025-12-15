@@ -137,7 +137,7 @@ with st.sidebar:
         
         recirc = st.slider(
             "Recirculación (%)",
-            5.0, 20.0,
+            1.0, 20.0,
             float(st.session_state.simulador.params['fraccion_recirculacion'] * 100),
             1.0,
             format="%.1f"
@@ -146,15 +146,15 @@ with st.sidebar:
         
         tau_rec = st.slider(
             "Retardo recirculación (min)",
-            30, 180,
+            0, 30,
             int(st.session_state.simulador.params['tau_recirculacion']),
-            step=10
+            step=1
         )
         st.session_state.simulador.params['tau_recirculacion'] = tau_rec
         
         tau_finos = st.slider(
             "Retardo finos (min)",
-            20, 120,
+            0, 300,
             int(st.session_state.simulador.params['tau_finos']),
             step=10
         )
@@ -543,3 +543,4 @@ st.caption("""
 if st.session_state.simulando:
     time.sleep(st.session_state.velocidad_sim)
     st.rerun()
+
